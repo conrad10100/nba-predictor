@@ -130,6 +130,17 @@ class ModelRun(Base):
     artifact: Mapped[bytes] = mapped_column(LargeBinary)  # joblib bundle of point + quantile models
 
 
+class GameLine(Base):
+    """Latest pre-game sportsbook line per game (from ESPN's scoreboard, which drops odds once a game is played)."""
+
+    __tablename__ = "game_lines"
+    game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    home_spread: Mapped[float] = mapped_column(Float)  # e.g. +9.5 when the home team is a 9.5-point underdog
+    total: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class DailyEvaluation(Base):
     """How the pre-game predictions for one date did once the games were played."""
 

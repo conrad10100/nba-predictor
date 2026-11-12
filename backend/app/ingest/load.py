@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal, upsert
 from app.ingest import nba_client
-from app.models import Game, Injury, Player, PlayerGameStat, TeamGameStat
+from app.models import Game, GameLine, Injury, Player, PlayerGameStat, Team, TeamGameStat
 
 REGULAR_SEASON_PREFIX = "002"
 
@@ -122,6 +122,21 @@ def load_players(season: str) -> int:
             "pos_group": pos[0] if pos else None,
         })
     return upsert(Player.__table__, rows)
+
+
+def load_game_lines(dates: list[date]) -> int:
+    """Store the current sportsbook line for each listed date's games. Never blanks out a line once games start."""
+    with SessionLocal() as s:
+        abbr_to_id = {t.abbr: t.id for t in s.scalars(select(Team))}
+        games = s.scalars(select(Game).where(Game.date.in_(dates))).all()
+    by_matchup = {(g.date, g.home_team_id, g.away_team_id): g.id for g in games}
+    rows = []
+    for d in dates:
+        for line in nba_client.espn_game_lines(d):
+            game_id = by_matchup.get((d, abbr_to_id.get(line["home"]), abbr_to_id.get(line["away"])))
+            if game_id:
+                rows.append({"game_id": game_id, "home_spread": line["home_spread"], "total": line["total"], "provider": line["provider"]})
+    return upsert(GameLine.__table__, rows)
 
 
 def load_injuries(on: date | None = None) -> tuple[int, list[str]]:

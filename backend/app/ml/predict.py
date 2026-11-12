@@ -131,6 +131,7 @@ def _response(fr, games, rows, out, injuries, overrides, version, on) -> dict:
             "def_rtg": _num(ctx["opp_def_rtg_season"]) if ctx is not None else None,  # filled from the opponent's row below
         }
 
+    lines = fr.lines.set_index("game_id")
     games_out = []
     for g in games.itertuples():
         home, away = team_info(g.id, g.home_team_id), team_info(g.id, g.away_team_id)
@@ -138,6 +139,7 @@ def _response(fr, games, rows, out, injuries, overrides, version, on) -> dict:
         games_out.append({
             "game_id": g.id, "home": home, "away": away,
             "same_conference": home["conference"] == away["conference"],
+            "line": _line(lines, g.id, home["abbr"], away["abbr"]),
             "out": [
                 {"player_id": int(pid), "name": names.get(pid, str(pid)), "team_id": int(tid),
                  "status": injuries.get(pid, {}).get("status", "Out"), "manual": pid in overrides.out}
@@ -159,6 +161,14 @@ def _response(fr, games, rows, out, injuries, overrides, version, on) -> dict:
         })
     preds.sort(key=lambda p: -(p["pts_pred"] or 0))
     return {"date": on.isoformat(), "model_version": version, "games": games_out, "predictions": preds}
+
+
+def _line(lines: pd.DataFrame, game_id: str, home: str, away: str) -> dict | None:
+    if game_id not in lines.index:
+        return None
+    spread, total = float(lines.at[game_id, "home_spread"]), float(lines.at[game_id, "total"])
+    favorite = home if spread < 0 else away if spread > 0 else None
+    return {"favorite": favorite, "spread": abs(spread), "total": total}
 
 
 def _out_players(fr: Frames, game, out: set[int]):

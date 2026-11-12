@@ -231,9 +231,16 @@ function GameCard({ game, players, baseById, onOut, onAvailable, onToggleB2b }: 
           <span className="text-muted">@</span>
           <TeamHeader team={game.home} opp={game.away} home onToggleB2b={onToggleB2b} />
         </div>
-        <span className={`rounded-full px-2 py-0.5 text-xs ${game.same_conference ? "bg-surface-2 font-medium" : "text-text-2"}`}>
-          {game.same_conference ? "Conference game" : "East vs West"}
-        </span>
+        <div className="flex items-center gap-2">
+          {game.line && (
+            <span className="num text-xs text-text-2" title="Sportsbook line (DraftKings via ESPN)">
+              {game.line.favorite ? `${game.line.favorite} −${game.line.spread}` : "Even"} · O/U {game.line.total}
+            </span>
+          )}
+          <span className={`rounded-full px-2 py-0.5 text-xs ${game.same_conference ? "bg-surface-2 font-medium" : "text-text-2"}`}>
+            {game.same_conference ? "Conference game" : "East vs West"}
+          </span>
+        </div>
       </div>
 
       {game.out.length > 0 && (

@@ -11,7 +11,7 @@ import pandas as pd
 from sqlalchemy import select
 
 from app.db import engine
-from app.models import Game, Player, PlayerGameStat, Team, TeamGameStat
+from app.models import Game, GameLine, Player, PlayerGameStat, Team, TeamGameStat
 
 TARGETS = ["pts", "reb", "ast"]
 PLAYER_ROLL_COLS = ["pts", "reb", "ast", "min", "fga", "fta", "fg3a", "usg"]
@@ -47,6 +47,9 @@ OUT_STATUSES = {"Out", "Doubtful"}
 # averaging >= 15 minutes in those appearances.
 ROTATION_WINDOW, ROTATION_MIN_GAMES, ROTATION_MIN_MINUTES = 5, 3, 15.0
 
+# Sportsbook view of the game, from this team's side. Missing for games before lines were recorded.
+LINE_FEATURES = ["game_total", "team_spread", "implied_team_pts", "implied_opp_pts"]
+
 FEATURES = (
     [f"{c}_{w}" for c in PLAYER_ROLL_COLS for w in ("l5", "l10", "season", "ewm")]
     + [f"{k}_{w}" for k in RATES for w in RATES_WINDOWS]
@@ -62,6 +65,7 @@ FEATURES = (
     + [f"opp_pos_{t}_allowed" for t in TARGETS]
     + ["rest_days", "b2b", "three_in_four", "away_streak", "opp_rest_days", "opp_b2b", "rest_advantage"]
     + ["is_home", "same_conference", "same_division", "team_game_number"]
+    + LINE_FEATURES
     + ["missing_teammates", "missing_teammate_pts", "missing_teammate_reb", "missing_teammate_ast", "missing_teammate_min"]
 )
 
@@ -73,6 +77,7 @@ class Frames:
     games: pd.DataFrame
     players: pd.DataFrame
     teams: pd.DataFrame
+    lines: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["game_id", "home_spread", "total"]))
 
 
 def load_frames() -> Frames:
@@ -82,7 +87,8 @@ def load_frames() -> Frames:
         ts = pd.read_sql(select(TeamGameStat), conn)
         players = pd.read_sql(select(Player), conn)
         teams = pd.read_sql(select(Team), conn)
-    return Frames(ps, ts, games, players, teams)
+        lines = pd.read_sql(select(GameLine.game_id, GameLine.home_spread, GameLine.total), conn)
+    return Frames(ps, ts, games, players, teams, lines)
 
 
 @dataclass
@@ -134,6 +140,11 @@ def _team_frame(fr: Frames, games: pd.DataFrame, upcoming: Upcoming | None) -> p
     stats["net_rtg"] = stats["off_rtg"] - stats["def_rtg"]
     stats = stats.drop(columns=["opp_fga", "opp_fta", "opp_fg3a", "opp_tov", "opp_dreb"])
     tg = tg.merge(stats, on=["team_id", "game_id"], how="left")
+    tg = tg.merge(fr.lines[["game_id", "home_spread", "total"]], on="game_id", how="left")
+    tg["team_spread"] = np.where(tg["is_home"] == 1, tg["home_spread"], -tg["home_spread"])  # negative = favored
+    tg["game_total"] = tg["total"]
+    tg["implied_team_pts"] = tg["game_total"] / 2 - tg["team_spread"] / 2
+    tg["implied_opp_pts"] = tg["game_total"] / 2 + tg["team_spread"] / 2
     tg = tg.sort_values(["team_id", "date", "game_id"]).reset_index(drop=True)
 
     by_team = tg.groupby("team_id")
@@ -246,7 +257,7 @@ def _expanding_split(pg: pd.DataFrame, keys: list[str], suffix: str) -> pd.DataF
 def _merge_team_context(pg: pd.DataFrame, tg: pd.DataFrame, teams: pd.DataFrame) -> pd.DataFrame:
     own_cols = [f"{c}_{w}" for c in OWN_TEAM_COLS for w in ("season", "l10")]
     own = tg[["team_id", "game_id", *own_cols, *[f"h2h_{c}" for c in H2H_COLS], "h2h_games",
-              "rest_days", "b2b", "three_in_four", "away_streak", "team_game_number"]]
+              "rest_days", "b2b", "three_in_four", "away_streak", "team_game_number", *LINE_FEATURES]]
     own = own.rename(columns={c: f"team_{c}" for c in own_cols})
     opp_cols = [f"{c}_{w}" for c in TEAM_ROLL_COLS for w in ("season", "l10")]
     opp = tg[["team_id", "game_id", *opp_cols, "rest_days", "b2b"]].rename(

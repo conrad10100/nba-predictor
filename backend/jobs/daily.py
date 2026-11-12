@@ -15,7 +15,7 @@ from app.clock import today_et
 from app.config import CURRENT_SEASON
 from app.db import engine
 from app.features.build import load_frames
-from app.ingest.load import load_injuries, load_players, load_schedule, load_season_logs
+from app.ingest.load import load_game_lines, load_injuries, load_players, load_schedule, load_season_logs
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
@@ -53,6 +53,7 @@ def run(refresh_only: bool = False) -> None:
 
     n_inj, unmatched = load_injuries(today)
     log.info("injuries: %d stored, %d unmatched %s", n_inj, len(unmatched), unmatched[:10])
+    log.info("game lines: %d stored", load_game_lines([today, today + timedelta(days=1)]))
 
     if not refresh_only:
         for r in train_all():

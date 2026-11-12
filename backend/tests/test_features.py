@@ -138,3 +138,14 @@ def test_conformal_ranges_cover_80_percent_and_scale_with_volatility():
     assert 0.77 < intervals.coverage(df["pts"].to_numpy()[n // 2 :], lo, hi) < 0.83
     width = hi - lo
     assert width[vol[n // 2 :] == 9.0].mean() > 2.5 * width[vol[n // 2 :] == 3.0].mean()
+
+
+def test_betting_line_features_from_each_side():
+    fr = _frames()
+    # Game 0: A hosts B, A favored by 6.5, total 220.
+    fr.lines = pd.DataFrame([{"game_id": fr.games.iloc[0]["id"], "home_spread": -6.5, "total": 220.0}])
+    s = _star(build_features(fr))
+    assert s.loc[0, "team_spread"] == -6.5
+    assert s.loc[0, "implied_team_pts"] == pytest.approx(113.25)
+    assert s.loc[0, "implied_opp_pts"] == pytest.approx(106.75)
+    assert np.isnan(s.loc[1, "game_total"])  # no line recorded for that game
