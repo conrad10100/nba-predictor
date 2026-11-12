@@ -48,6 +48,12 @@ def load_season_logs(season: str, since: date | None = None) -> tuple[int, int]:
     if since:
         teams = teams[teams["GAME_DATE"] >= since]
         players = players[players["GAME_DATE"] >= since]
+    # The log includes games still in progress. A finished game has >= 240 team minutes (5 x 48) for both sides;
+    # anything less is partial, so skip it until a later run sees it complete.
+    complete = teams.groupby("GAME_ID")["MIN"].min() >= 240
+    complete_ids = set(complete[complete].index)
+    teams = teams[teams["GAME_ID"].isin(complete_ids)]
+    players = players[players["GAME_ID"].isin(complete_ids)]
 
     teams["is_home"] = teams["MATCHUP"].str.contains("vs.")
     teams["poss"] = _possessions(teams)

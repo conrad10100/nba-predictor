@@ -6,6 +6,7 @@ python -m jobs.daily --refresh  pre-tip-off: refresh injury report and re-predic
 
 import argparse
 import logging
+import sys
 from datetime import timedelta
 
 from sqlalchemy import text
@@ -62,7 +63,8 @@ def run(refresh_only: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # stdout, so Railway doesn't tag every INFO line as an error (it treats stderr as errors).
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh", action="store_true", help="injury refresh + re-predict only")
     run(parser.parse_args().refresh)
