@@ -13,7 +13,7 @@ const SEGMENT_LABEL: Record<string, string> = {
 
 export function AccuracyView() {
   const [days, setDays] = useState<DayEval[] | null>(null);
-  const [totals, setTotals] = useState<Partial<EvalTotals>>({});
+  const [totals, setTotals] = useState<Record<"live" | "backtest", Partial<EvalTotals>>>({ live: {}, backtest: {} });
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -24,6 +24,8 @@ export function AccuracyView() {
   }, []);
 
   const dates = useMemo(() => [...new Set(days?.map((d) => d.date))].sort(), [days]);
+  const backtestDates = useMemo(() => new Set(days?.filter((d) => d.kind === "backtest").map((d) => d.date)), [days]);
+  const lastBacktest = [...backtestDates].sort().at(-1);
   const byTarget = (t: Target) => dates.map((d) => days!.find((e) => e.date === d && e.target === t) ?? null);
 
   if (error) return <p className="text-critical">{error}</p>;
@@ -37,6 +39,13 @@ export function AccuracyView() {
           <p className="text-sm text-text-2">
             Every morning, yesterday&apos;s pre-game predictions are graded against the box scores. {dates.length} days tracked.
           </p>
+          {lastBacktest && (
+            <p className="mt-1 max-w-3xl text-xs text-text-2">
+              Days through {lastBacktest} are a <strong>backtest</strong>: each week was predicted by a model trained only on
+              games before it. The backtest knows who actually played, which live pre-game predictions don&apos;t always know,
+              so its accuracy runs slightly better than live.
+            </p>
+          )}
         </div>
         <a href={exportUrl} className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-surface-2">
           Export all predictions (CSV)
@@ -51,9 +60,16 @@ export function AccuracyView() {
 
       {dates.length > 0 && (
         <>
-          <section className="grid gap-3 md:grid-cols-3">
-            {TARGETS.map((t) => totals[t] && <TotalsCard key={t} target={t} totals={totals[t]!} />)}
-          </section>
+          {(["live", "backtest"] as const).map((kind) =>
+            Object.keys(totals[kind]).length > 0 ? (
+              <section key={kind}>
+                <h2 className="mb-2 text-sm font-medium text-text-2">{kind === "live" ? "Live predictions" : "Backtest"}</h2>
+                <div className="grid gap-3 md:grid-cols-3">
+                  {TARGETS.map((t) => totals[kind][t] && <TotalsCard key={t} target={t} totals={totals[kind][t]!} label={kind === "live" ? "season to date" : "backtest"} />)}
+                </div>
+              </section>
+            ) : null,
+          )}
 
           <section className="grid gap-4 lg:grid-cols-3">
             {TARGETS.map((t) => (
@@ -81,18 +97,18 @@ export function AccuracyView() {
           />
 
           <SegmentTable days={days} />
-          <DayDetail dates={dates} days={days} selected={selected} onSelect={setSelected} />
+          <DayDetail dates={dates} days={days} backtestDates={backtestDates} selected={selected} onSelect={setSelected} />
         </>
       )}
     </div>
   );
 }
 
-function TotalsCard({ target, totals }: { target: Target; totals: EvalTotals[Target] }) {
+function TotalsCard({ target, totals, label }: { target: Target; totals: EvalTotals[Target]; label: string }) {
   const better = totals.baseline_mae != null && totals.mae < totals.baseline_mae;
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
-      <div className="text-sm text-text-2">{STAT_LABEL[target]} · season to date</div>
+      <div className="text-sm text-text-2">{STAT_LABEL[target]} · {label}</div>
       <div className="num mt-1 text-3xl font-semibold">±{fmt(totals.mae, 2)}</div>
       <div className="text-xs text-text-2">
         average miss per player · L10 average misses by ±{fmt(totals.baseline_mae, 2)}{" "}
@@ -156,7 +172,9 @@ function SegmentTable({ days }: { days: DayEval[] }) {
   );
 }
 
-function DayDetail({ dates, days, selected, onSelect }: { dates: string[]; days: DayEval[]; selected: string | null; onSelect: (d: string) => void }) {
+function DayDetail({ dates, days, backtestDates, selected, onSelect }: {
+  dates: string[]; days: DayEval[]; backtestDates: Set<string>; selected: string | null; onSelect: (d: string) => void;
+}) {
   const [loaded, setLoaded] = useState<{ date: string; players: GradedPlayer[] } | null>(null);
   useEffect(() => {
     if (!selected) return;
@@ -171,7 +189,7 @@ function DayDetail({ dates, days, selected, onSelect }: { dates: string[]; days:
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2.5">
         <span className="text-sm font-medium">Day detail</span>
         <select value={selected ?? ""} onChange={(e) => onSelect(e.target.value)} className="rounded-md border border-border bg-bg px-2 py-1 text-sm">
-          {[...dates].reverse().map((d) => <option key={d} value={d}>{d}</option>)}
+          {[...dates].reverse().map((d) => <option key={d} value={d}>{d}{backtestDates.has(d) ? " (backtest)" : ""}</option>)}
         </select>
         <span className="text-sm text-text-2">
           {summary.map((s) => `${STAT_LABEL[s.target]}: ${Math.round(s.within_close_pct * s.n)} of ${s.n} within ±${s.close_threshold}`).join(" · ")}

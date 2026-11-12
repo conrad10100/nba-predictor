@@ -13,6 +13,7 @@ from app.clock import today_et
 from app.config import CORS_ORIGINS
 from app.db import SessionLocal
 from app.features.build import Frames, load_frames
+from app.ml.backtest import VERSION_PREFIX as BACKTEST_PREFIX
 from app.ml.predict import Overrides, predict_slate
 from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, Player, PlayerGameStat, Prediction, Team
 
@@ -170,18 +171,20 @@ def evaluation(start: date | None = None, end: date | None = None):
         {"date": r.game_date.isoformat(), "target": r.target, "model_version": r.model_version, "n": r.n_players,
          "mae": r.mae, "rmse": r.rmse, "bias": r.bias, "baseline_mae": r.baseline_mae, "beat_baseline_pct": r.beat_baseline_pct,
          "close_threshold": r.close_threshold, "within_close_pct": r.within_close_pct, "within_wide_pct": r.within_wide_pct,
-         "interval_coverage": r.interval_coverage, "segments": r.segments}
+         "interval_coverage": r.interval_coverage, "segments": r.segments,
+         "kind": "backtest" if r.model_version.startswith(BACKTEST_PREFIX) else "live"}
         for r in rows
     ]
-    totals = {}
+    # Live and backtest results are summarized separately so season totals never mix the two.
+    totals: dict[str, dict] = {"live": {}, "backtest": {}}
     if days:
         df = pd.DataFrame(days)
-        for target, g in df.groupby("target"):
+        for (kind, target), g in df.groupby(["kind", "target"]):
             w = g["n"]
             avg = lambda col: float((g[col] * w).sum() / w.sum()) if g[col].notna().all() else None  # noqa: E731
-            totals[target] = {"days": len(g), "n": int(w.sum()), **{c: avg(c) for c in
-                              ("mae", "bias", "baseline_mae", "beat_baseline_pct", "within_close_pct", "within_wide_pct", "interval_coverage")},
-                              "close_threshold": float(g["close_threshold"].iat[0])}
+            totals[kind][target] = {"days": len(g), "n": int(w.sum()), **{c: avg(c) for c in
+                                    ("mae", "bias", "baseline_mae", "beat_baseline_pct", "within_close_pct", "within_wide_pct", "interval_coverage")},
+                                    "close_threshold": float(g["close_threshold"].iat[0])}
     return {"days": days, "totals": totals}
 
 

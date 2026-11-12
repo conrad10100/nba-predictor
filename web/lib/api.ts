@@ -17,7 +17,11 @@ export type TeamSide = {
 
 export type OutPlayer = { player_id: number; name: string; team_id: number; status: string; manual: boolean };
 
-export type SlateGame = { game_id: string; home: TeamSide; away: TeamSide; same_conference: boolean; out: OutPlayer[] };
+export type GameLine = { favorite: string | null; spread: number; total: number };
+
+export type SlateGame = {
+  game_id: string; home: TeamSide; away: TeamSide; same_conference: boolean; out: OutPlayer[]; line: GameLine | null;
+};
 
 type PerTarget<S extends string> = { [K in `${Target}_${S}`]: number | null };
 
@@ -90,6 +94,7 @@ export type DayEval = {
   within_wide_pct: number;
   interval_coverage: number;
   segments: Record<string, Segment>;
+  kind: "live" | "backtest";
 };
 
 export type EvalTotals = Record<Target, {
@@ -116,7 +121,7 @@ export const api = {
     request<Slate>("/api/slate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, ...o }) }),
   player: (id: string) => request<PlayerDetail>(`/api/players/${id}`),
   metrics: () => request<ModelMetrics>("/api/model/metrics"),
-  evaluation: () => request<{ days: DayEval[]; totals: Partial<EvalTotals> }>("/api/evaluation"),
+  evaluation: () => request<{ days: DayEval[]; totals: Record<"live" | "backtest", Partial<EvalTotals>> }>("/api/evaluation"),
   evaluationDay: (date: string) => request<GradedPlayer[]>(`/api/evaluation/${date}`),
 };
 
