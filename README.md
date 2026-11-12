@@ -50,14 +50,22 @@ Context: home/away, rest days, back-to-back, 3 games in 4 nights, road-trip leng
 rest advantage, same conference / division, game number in the season, and production missing from injured
 rotation teammates.
 
-## Deploy (Supabase + Railway)
+## Deployment
 
-1. Create a Supabase project and copy the pooler connection string into `DATABASE_URL` (see `backend/.env.example`).
-2. Run the backfill once against it: `DATABASE_URL=... python -m app.ingest.backfill && python -m app.ml.train`
-3. In Railway, create three services from this repo with root directory `backend/`, each with `DATABASE_URL` set:
-   - **api**: config file `backend/railway.api.json`; also set `CORS_ORIGINS` to the website's URL
-   - **daily**: config file `backend/railway.daily.json` (10:00 UTC, about 5–6am ET, after last night's games are final)
-   - **refresh**: config file `backend/railway.refresh.json` (22:00 UTC, about 5–6pm ET, before tip-off)
-4. Deploy `web/` (Railway or Vercel) with `NEXT_PUBLIC_API_URL` pointing at the api service.
+Production runs entirely in the cloud; nothing depends on a laptop being on.
+
+- **Database:** Supabase project `nba-predictor` (us-east-1). The app connects as role `nba_app` to a private
+  `nba` schema that is not exposed through Supabase's REST API.
+- **Railway project `nba-predictor`:** each service is built from this repo with Railpack:
+
+| Service | Root | Start command | Schedule |
+|---|---|---|---|
+| api | `/backend` | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` | always on, healthcheck `/api/health` |
+| daily | `/backend` | `python -m jobs.daily` | `0 10 * * *` (10:00 UTC, about 5–6am ET) |
+| refresh | `/backend` | `python -m jobs.daily --refresh` | `0 22 * * *` (22:00 UTC, about 5–6pm ET) |
+| web | `/web` | `npm run start` | always on |
+
+Variables: backend services get `DATABASE_URL` and `CURRENT_SEASON`; api also gets `CORS_ORIGINS` (the web URL);
+web gets `NEXT_PUBLIC_API_URL` (the api URL, baked in at build time). Pushing to `main` redeploys the affected services.
 
 stats.nba.com sometimes rate-limits or blocks cloud IPs. If the daily job fails on the ingest step, check its logs first.
