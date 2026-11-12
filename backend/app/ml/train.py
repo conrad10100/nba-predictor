@@ -39,20 +39,31 @@ def _weights(dates: pd.Series, half_life_days: float) -> np.ndarray:
     return 0.5 ** (age / half_life_days)
 
 
-def _score(params: dict, train: pd.DataFrame, hold: pd.DataFrame, target: str) -> tuple[float, object]:
-    m = _model(params).fit(train[FEATURES], train[target], sample_weight=_weights(train["date"], params["half_life_days"]))
-    return mean_absolute_error(hold[target], m.predict(hold[FEATURES])), m
+def usable_features(train: pd.DataFrame) -> list[str]:
+    """FEATURES that have at least one value in `train`.
+
+    A brand-new feature (e.g. sportsbook lines, only recorded going forward) is entirely missing from the
+    training window at first, and HistGradientBoostingRegressor crashes on an all-missing column. Leave such
+    features out until they have data; the model bundle records which features it was trained on.
+    """
+    return [f for f in FEATURES if train[f].notna().any()]
+
+
+def _score(params: dict, train: pd.DataFrame, hold: pd.DataFrame, target: str, feats: list[str]) -> tuple[float, object]:
+    m = _model(params).fit(train[feats], train[target], sample_weight=_weights(train["date"], params["half_life_days"]))
+    return mean_absolute_error(hold[target], m.predict(hold[feats])), m
 
 
 def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
     cutoff = rows["date"].max() - pd.Timedelta(days=HOLDOUT_DAYS)
     train, hold = rows[rows["date"] <= cutoff], rows[rows["date"] > cutoff]
+    feats = usable_features(train)
 
     # 1) Champion vs today's challenger on the most recent weeks, trained only on what came before them.
     champ = tuning.champion(target)
     chall = tuning.challenger(target, champ, today_et())
-    champ_mae, champ_model = _score(champ, train, hold, target)
-    chall_mae, chall_model = _score(chall, train, hold, target) if chall != champ else (np.inf, None)
+    champ_mae, champ_model = _score(champ, train, hold, target, feats)
+    chall_mae, chall_model = _score(chall, train, hold, target, feats) if chall != champ else (np.inf, None)
     if chall_mae < champ_mae * (1 - tuning.MIN_IMPROVEMENT):
         params, point, mae = chall, chall_model, chall_mae
         note = f"challenger won: MAE {chall_mae:.3f} < {champ_mae:.3f} with {_diff(champ, chall)}"
@@ -61,7 +72,7 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
         note = f"champion kept: MAE {champ_mae:.3f} vs challenger {_diff(champ, chall)} {chall_mae:.3f}"
     tuning.save_champion(target, params, note)
 
-    pred = point.predict(hold[FEATURES])
+    pred = point.predict(hold[feats])
     baseline_mae = mean_absolute_error(hold[target], hold[f"{target}_l10"])
     # Calibrate ranges on the first half of the holdout and check them on the second, so coverage is honest.
     first = (hold["date"] <= hold["date"].median()).to_numpy()
@@ -70,15 +81,15 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
     coverage = intervals.coverage(hold.loc[~first, target].to_numpy(), lo, hi)
     cal = intervals.fit(hold, target, pred)
     sample = hold.sample(min(len(hold), 2000), random_state=0)
-    imp = permutation_importance(point, sample[FEATURES], sample[target], n_repeats=1, random_state=0, scoring="neg_mean_absolute_error")
-    importance = dict(sorted(zip(FEATURES, imp.importances_mean.round(4).tolist()), key=lambda kv: -kv[1]))
+    imp = permutation_importance(point, sample[feats], sample[target], n_repeats=1, random_state=0, scoring="neg_mean_absolute_error")
+    importance = dict(sorted(zip(feats, imp.importances_mean.round(4).tolist()), key=lambda kv: -kv[1]))
 
     # 2) Refit on everything with the tree count found above (more data -> ~10% more trees).
     w_all = _weights(rows["date"], params["half_life_days"])
     n_iter = int(point.n_iter_ * 1.1)
-    X, y = rows[FEATURES], rows[target]
+    X, y = rows[feats], rows[target]
     bundle = {
-        "features": FEATURES,
+        "features": feats,
         "params": params,
         "interval": cal,
         "point": _model(params, n_iter, early_stop=False).fit(X, y, sample_weight=w_all),
