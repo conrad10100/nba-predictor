@@ -23,7 +23,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">
         <header className="border-b border-border bg-surface">
-          <nav className="mx-auto flex max-w-6xl items-center gap-6 px-4 py-3">
+          <nav className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-1 px-4 py-3">
             <Link href="/" className="font-semibold tracking-tight">
               Hoops Projections
             </Link>
@@ -32,6 +32,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             </Link>
             <Link href="/accuracy" className="text-sm text-text-2 hover:text-text">
               Accuracy
+            </Link>
+            <Link href="/performance" className="text-sm text-text-2 hover:text-text">
+              Performance
             </Link>
             <Link href="/model" className="text-sm text-text-2 hover:text-text">
               Model

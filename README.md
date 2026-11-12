@@ -4,7 +4,7 @@ Daily projections of NBA player points, rebounds and assists, retrained every mo
 with what-if controls for injuries and back-to-backs and a running record of how accurate the predictions were.
 
 - `backend/`: Python 3.15, FastAPI, scikit-learn / XGBoost, SQLAlchemy (SQLite locally, Supabase Postgres in production)
-- `web/`: Next.js website (slate, player pages, accuracy tracking, model page)
+- `web/`: Next.js website (slate, player pages, accuracy tracking, over/under performance vs. DraftKings, model page)
 
 ## Run locally
 
@@ -31,6 +31,11 @@ Tests: `cd backend && .venv/bin/python -m pytest`. They check that no feature ca
    setting (recency half-life, tree size, learning rate, or XGBoost vs HistGradientBoosting) against the
    champion on the last 3 weeks, and keep whichever is more accurate
 5. Retrain on all history and predict today's games; store the predictions for tomorrow's evaluation
+
+Each run also stores DraftKings points/rebounds/assists player prop lines from ESPN (`player_props`): today's lines
+before tip-off, yesterday's closing lines, and any finished dates this season that have none yet (a one-time backfill).
+The **Performance** page grades each prediction as an over/under pick against that line: over when the prediction is
+above the line, under when below; it wins when the player finishes on that side, and landing exactly on it is a push.
 
 `python -m jobs.daily --refresh` re-pulls the injury report and re-predicts (no retrain). Run it before tip-off.
 

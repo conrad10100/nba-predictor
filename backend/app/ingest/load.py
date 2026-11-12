@@ -3,11 +3,11 @@
 from datetime import date, datetime
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import SessionLocal, upsert
 from app.ingest import nba_client
-from app.models import Game, GameLine, Injury, Player, PlayerGameStat, Team, TeamGameStat
+from app.models import Game, GameLine, Injury, Player, PlayerGameStat, PlayerProp, Team, TeamGameStat
 
 REGULAR_SEASON_PREFIX = "002"
 
@@ -137,6 +137,61 @@ def load_game_lines(dates: list[date]) -> int:
             if game_id:
                 rows.append({"game_id": game_id, "home_spread": line["home_spread"], "total": line["total"], "provider": line["provider"]})
     return upsert(GameLine.__table__, rows)
+
+
+def load_player_props(dates: list[date]) -> tuple[int, list[str]]:
+    """Store DraftKings points/rebounds/assists lines for the listed dates' games.
+
+    Games that haven't started overwrite any earlier snapshot (latest pre-game line wins). Finished games only fill
+    in lines we never captured, so a pre-game snapshot is never replaced. Games in progress are skipped.
+    Returns (rows written, ESPN names that couldn't be matched to a player).
+    """
+    with SessionLocal() as s:
+        abbr_to_id = {t.abbr: t.id for t in s.scalars(select(Team))}
+        games = s.scalars(select(Game).where(Game.date.in_(dates))).all()
+        by_name = {nba_client.normalize_name(p.name): p.id for p in s.scalars(select(Player))}
+        known = dict(s.execute(select(PlayerProp.espn_athlete_id, PlayerProp.player_id).distinct()).all())
+    by_matchup = {(g.date, g.home_team_id, g.away_team_id): g.id for g in games}
+    rosters: dict[str, dict[int, str]] = {}
+    pre, post, unmatched = [], [], set()
+    for d in dates:
+        for prop in nba_client.espn_player_props(d):
+            game_id = by_matchup.get((d, abbr_to_id.get(prop["home"]), abbr_to_id.get(prop["away"])))
+            if game_id is None or prop["state"] == "in":
+                continue
+            aid = prop["espn_athlete_id"]
+            if aid not in known:
+                name = _espn_name(aid, prop["espn_team_ids"], rosters)
+                known[aid] = by_name.get(nba_client.normalize_name(name)) if name else None
+                if known[aid] is None:
+                    unmatched.add(name or f"ESPN athlete {aid}")
+            if known[aid] is None:
+                continue
+            row = {"player_id": known[aid], "game_id": game_id, "target": prop["target"], "line": prop["line"],
+                   "open_line": prop["open_line"], "espn_athlete_id": aid, "provider": "DraftKings", "source_updated": prop["updated"]}
+            (pre if prop["state"] == "pre" else post).append(row)
+    n = upsert(PlayerProp.__table__, pre) + upsert(PlayerProp.__table__, post, update=False)
+    return n, sorted(unmatched)
+
+
+def _espn_name(athlete_id: int, team_ids: list[str], rosters: dict[str, dict[int, str]]) -> str | None:
+    for team_id in team_ids:
+        if team_id not in rosters:
+            rosters[team_id] = nba_client.espn_team_roster(team_id)
+        if athlete_id in rosters[team_id]:
+            return rosters[team_id][athlete_id]
+    return nba_client.espn_athlete_name(athlete_id)  # e.g. traded since the game
+
+
+def dates_missing_props(season: str, through: date) -> list[date]:
+    """Dates with finished games this season and no prop lines stored for any of them (for the season backfill)."""
+    with SessionLocal() as s:
+        rows = s.execute(
+            select(Game.date).outerjoin(PlayerProp, PlayerProp.game_id == Game.id)
+            .where(Game.season == season, Game.status == "final", Game.date <= through)
+            .group_by(Game.date).having(func.count(PlayerProp.game_id) == 0).order_by(Game.date)
+        ).scalars().all()
+    return list(rows)
 
 
 def load_injuries(on: date | None = None) -> tuple[int, list[str]]:

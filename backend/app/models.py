@@ -141,6 +141,26 @@ class GameLine(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class PlayerProp(Base):
+    """DraftKings over/under line for a player's points, rebounds or assists in one game (via ESPN).
+
+    Taken before tip-off when the daily/refresh jobs see the game; for games first seen after they finished
+    (e.g. the season backfill) it is the closing line ESPN keeps showing. A pre-game snapshot is never
+    overwritten once the game has started.
+    """
+
+    __tablename__ = "player_props"
+    player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[str] = mapped_column(String(10), primary_key=True, index=True)
+    target: Mapped[str] = mapped_column(String(4), primary_key=True)  # pts | reb | ast
+    line: Mapped[float] = mapped_column(Float)
+    open_line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    espn_athlete_id: Mapped[int] = mapped_column(Integer, index=True)
+    provider: Mapped[str] = mapped_column(String(32), default="DraftKings")
+    source_updated: Mapped[str | None] = mapped_column(String(32), nullable=True)  # ESPN's lastUpdated for the line
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class DailyEvaluation(Base):
     """How the pre-game predictions for one date did once the games were played."""
 
