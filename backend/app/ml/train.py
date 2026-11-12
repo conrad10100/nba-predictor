@@ -15,19 +15,18 @@ from app.clock import today_et
 from app.config import TARGETS as ACTIVE_TARGETS
 from app.db import upsert
 from app.features.build import FEATURES, build_features, load_frames, training_rows
-from app.ml import tuning
+from app.ml import intervals, tuning
 from app.ml.registry import dump
 from app.ml.xgb import XGBModel
 from app.models import ModelRun
 
 HOLDOUT_DAYS = 21
 MAX_ITER = 800
-TARGET_COVERAGE = 0.80  # the p10-p90 range should contain 80% of actual results
 
 
 def _model(params: dict, max_iter: int = MAX_ITER, early_stop: bool = True, **loss):
     if params.get("model") == "xgboost":
-        return XGBModel(params, max_iter, early_stop, quantile=loss.get("quantile"))
+        return XGBModel(params, max_iter, early_stop)
     hgb = {k: v for k, v in params.items() if k not in ("half_life_days", "model")}
     return HistGradientBoostingRegressor(
         **hgb, **loss, max_iter=max_iter, early_stopping=early_stop, n_iter_no_change=25, validation_fraction=0.1, random_state=0
@@ -62,15 +61,14 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
         note = f"champion kept: MAE {champ_mae:.3f} vs challenger {_diff(champ, chall)} {chall_mae:.3f}"
     tuning.save_champion(target, params, note)
 
-    w = _weights(train["date"], params["half_life_days"])
-    p10 = _model(params, loss="quantile", quantile=0.1).fit(train[FEATURES], train[target], sample_weight=w).predict(hold[FEATURES])
-    p90 = _model(params, loss="quantile", quantile=0.9).fit(train[FEATURES], train[target], sample_weight=w).predict(hold[FEATURES])
     pred = point.predict(hold[FEATURES])
     baseline_mae = mean_absolute_error(hold[target], hold[f"{target}_l10"])
-    raw_coverage = float(((hold[target] >= p10) & (hold[target] <= p90)).mean())
-    scale = interval_scale(hold[target].to_numpy(), pred, p10, p90)
-    lo, hi = scale_interval(pred, p10, p90, scale)
-    coverage = float(((hold[target] >= lo) & (hold[target] <= hi)).mean())
+    # Calibrate ranges on the first half of the holdout and check them on the second, so coverage is honest.
+    first = (hold["date"] <= hold["date"].median()).to_numpy()
+    check_cal = intervals.fit(hold[first], target, pred[first])
+    lo, hi = intervals.apply(hold[~first], target, pred[~first], check_cal)
+    coverage = intervals.coverage(hold.loc[~first, target].to_numpy(), lo, hi)
+    cal = intervals.fit(hold, target, pred)
     sample = hold.sample(min(len(hold), 2000), random_state=0)
     imp = permutation_importance(point, sample[FEATURES], sample[target], n_repeats=1, random_state=0, scoring="neg_mean_absolute_error")
     importance = dict(sorted(zip(FEATURES, imp.importances_mean.round(4).tolist()), key=lambda kv: -kv[1]))
@@ -82,10 +80,8 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
     bundle = {
         "features": FEATURES,
         "params": params,
-        "interval_scale": scale,
+        "interval": cal,
         "point": _model(params, n_iter, early_stop=False).fit(X, y, sample_weight=w_all),
-        "p10": _model(params, n_iter, early_stop=False, loss="quantile", quantile=0.1).fit(X, y, sample_weight=w_all),
-        "p90": _model(params, n_iter, early_stop=False, loss="quantile", quantile=0.9).fit(X, y, sample_weight=w_all),
     }
     run = {
         "version": version, "target": target, "trained_at": datetime.now(timezone.utc).replace(tzinfo=None),
@@ -93,24 +89,10 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
         "rmse": float(np.sqrt(mean_squared_error(hold[target], pred))), "baseline_mae": float(baseline_mae),
         "interval_coverage": coverage,
         "promoted": bool(mae < baseline_mae),  # never ship a model that loses to "just use their last-10 average"
-        "params": params, "tuning_note": f"{note}; range scaled x{scale:.2f} (raw coverage {raw_coverage:.0%})", "feature_importance": importance, "artifact": dump(bundle),
+        "params": params, "tuning_note": note, "feature_importance": importance, "artifact": dump(bundle),
     }
     upsert(ModelRun.__table__, [run])
     return run
-
-
-def scale_interval(pred, p10, p90, scale: float):
-    """Stretch or shrink the range around the point prediction."""
-    return pred - scale * np.maximum(pred - p10, 0), pred + scale * np.maximum(p90 - pred, 0)
-
-
-def interval_scale(actual, pred, p10, p90) -> float:
-    """Smallest scale whose range covers TARGET_COVERAGE of recent results (split-conformal style calibration)."""
-    for scale in np.arange(0.3, 2.51, 0.02):
-        lo, hi = scale_interval(pred, p10, p90, scale)
-        if ((actual >= lo) & (actual <= hi)).mean() >= TARGET_COVERAGE:
-            return round(float(scale), 2)
-    return 2.5
 
 
 def _diff(a: dict, b: dict) -> str:

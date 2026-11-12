@@ -18,19 +18,18 @@ except Exception:  # ImportError, or XGBoostError when libomp is missing
 
 
 class XGBModel(RegressorMixin, BaseEstimator):
-    def __init__(self, params: dict, max_iter: int, early_stop: bool = True, quantile: float | None = None):
+    def __init__(self, params: dict, max_iter: int, early_stop: bool = True):
         self.params = params
         self.max_iter = max_iter
         self.early_stop = early_stop
-        self.quantile = quantile
 
     def _regressor(self) -> "xgboost.XGBRegressor":
         p = self.params
-        objective = {"objective": "reg:quantileerror", "quantile_alpha": self.quantile} if self.quantile else {"objective": "reg:squarederror"}
         return xgboost.XGBRegressor(
             n_estimators=self.max_iter, learning_rate=p["learning_rate"], max_leaves=p["max_leaf_nodes"], max_depth=0,
             grow_policy="lossguide", min_child_weight=p["min_samples_leaf"] / 4, reg_lambda=p["l2_regularization"],
-            tree_method="hist", early_stopping_rounds=25 if self.early_stop else None, random_state=0, n_jobs=-1, **objective,
+            tree_method="hist", early_stopping_rounds=25 if self.early_stop else None, random_state=0, n_jobs=-1,
+            objective="reg:squarederror",
         )
 
     def fit(self, X, y, sample_weight=None):

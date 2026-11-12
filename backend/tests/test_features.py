@@ -125,14 +125,16 @@ def test_rest_advantage():
     assert s.loc[3, "rest_advantage"] == 1 - 3
 
 
-def test_interval_calibration_hits_target_coverage():
-    from app.ml.train import interval_scale, scale_interval
+def test_conformal_ranges_cover_80_percent_and_scale_with_volatility():
+    from app.ml import intervals
 
     rng = np.random.default_rng(0)
-    actual = rng.normal(20, 5, 2000)
-    pred = np.full(2000, 20.0)
-    # Ranges twice as wide as they should be: +/-12.8 covers ~99%, so the scale should shrink to ~0.5.
-    scale = interval_scale(actual, pred, pred - 12.8, pred + 12.8)
-    lo, hi = scale_interval(pred, pred - 12.8, pred + 12.8, scale)
-    assert 0.80 <= ((actual >= lo) & (actual <= hi)).mean() < 0.83
-    assert 0.45 < scale < 0.55
+    n = 4000
+    vol = rng.choice([3.0, 9.0], n)  # steady vs streaky players
+    df = pd.DataFrame({"pts_std_l10": vol, "pts": 20 + rng.normal(0, vol)})
+    pred = np.full(n, 20.0)
+    cal = intervals.fit(df.iloc[: n // 2], "pts", pred[: n // 2])
+    lo, hi = intervals.apply(df.iloc[n // 2 :], "pts", pred[n // 2 :], cal)
+    assert 0.77 < intervals.coverage(df["pts"].to_numpy()[n // 2 :], lo, hi) < 0.83
+    width = hi - lo
+    assert width[vol[n // 2 :] == 9.0].mean() > 2.5 * width[vol[n // 2 :] == 3.0].mean()

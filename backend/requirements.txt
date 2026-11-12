@@ -12,5 +12,5 @@ requests==2.34.2
 scikit-learn==1.9.1
 sqlalchemy==2.1.8
 tzdata==2026.6
-uvicorn[standard]==0.54.0
+uvicorn==0.54.0
 xgboost==3.4.1

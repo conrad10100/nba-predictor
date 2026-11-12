@@ -11,7 +11,7 @@ from app.config import TARGETS as ACTIVE_TARGETS
 from app.db import SessionLocal, upsert
 from app.features.build import OUT_STATUSES, TARGETS, Frames, Upcoming, build_features
 from app.ml.registry import load_active
-from app.ml.train import scale_interval
+from app.ml import intervals
 from app.ml.tuning import bias_correction
 from app.models import Injury, Prediction
 
@@ -66,39 +66,41 @@ def predict_slate(fr: Frames, on: date, overrides: Overrides | None = None, pers
     rows = features[features["game_id"].isin(games["id"]) & features["pts"].isna()].reset_index(drop=True)
 
     version = None
+    predicted = []  # stats with a live model; the others are left blank rather than failing the whole slate
     for target in TARGETS:
-        if target not in ACTIVE_TARGETS:
+        active = load_active(target) if target in ACTIVE_TARGETS else None
+        if active is None:
             rows[[f"{target}_{k}" for k in ("raw", "pred", "p10", "p90")]] = np.nan
             continue
-        active = load_active(target)
-        if active is None:
-            raise RuntimeError(f"No promoted model for {target}; run `python -m app.ml.train` first")
+        predicted.append(target)
         version, bundle = active
         X = rows[bundle["features"]]
         raw = bundle["point"].predict(X)
         rows[f"{target}_raw"] = raw
         point = np.clip(raw + bias_correction(target), 0, None)
-        lo, hi = scale_interval(point, bundle["p10"].predict(X), bundle["p90"].predict(X), bundle.get("interval_scale", 1.0))
+        lo, hi = intervals.apply(rows, target, point, bundle.get("interval", intervals.FALLBACK))
         rows[f"{target}_pred"] = point
-        rows[f"{target}_p10"] = np.clip(lo, 0, None)
+        rows[f"{target}_p10"] = lo
         rows[f"{target}_p90"] = hi
+    if not predicted:
+        raise RuntimeError("No promoted models yet; run `python -m app.ml.train` first")
     rows["pra_pred"] = rows[[f"{t}_pred" for t in TARGETS]].sum(axis=1, min_count=len(TARGETS))
 
     if persist:
-        _save(rows, version, on, injuries)
+        _save(rows, version, on, injuries, predicted)
     return _response(fr, games, rows, out, injuries, overrides, version, on)
 
 
 CONTEXT_COLS = ["b2b", "rest_days", "same_conference", "is_home", "min_l10", "missing_teammate_pts", "projected_pace", "opp_def_rtg_season"]
 
 
-def _save(rows: pd.DataFrame, version: str, on: date, injuries: dict[int, dict]) -> None:
+def _save(rows: pd.DataFrame, version: str, on: date, injuries: dict[int, dict], targets: list[str]) -> None:
     """Store pre-game predictions plus the context the daily evaluation slices accuracy by."""
     records = []
     for r in rows.itertuples():
         ctx = {c: _num(getattr(r, c)) for c in CONTEXT_COLS}
         ctx["injury_status"] = injuries.get(r.player_id, {}).get("status")
-        for t in ACTIVE_TARGETS:
+        for t in targets:
             records.append({
                 "player_id": int(r.player_id), "game_id": r.game_id, "target": t, "game_date": on, "model_version": version,
                 "predicted": float(getattr(r, f"{t}_pred")), "p10": float(getattr(r, f"{t}_p10")), "p90": float(getattr(r, f"{t}_p90")),
