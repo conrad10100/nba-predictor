@@ -34,7 +34,7 @@ export function TopPicks({ date }: { date: string }) {
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-4 py-2.5">
         <h2 className="text-sm font-medium">Top picks vs. DraftKings</h2>
         <p className="text-xs text-text-2">
-          Biggest gap between the model and the line · <Link href="/performance" className="underline">track record</Link>
+          Biggest difference between the model's prediction and the DraftKings line · <Link href="/performance" className="underline">track record</Link>
         </p>
       </div>
       <div className="grid divide-y divide-border md:grid-cols-3 md:divide-x md:divide-y-0">
@@ -56,24 +56,19 @@ export function TopPicks({ date }: { date: string }) {
 }
 
 function PickRow({ p, rank }: { p: Pick; rank: number }) {
-  const graded = p.result === "win" || p.result === "loss" || p.result === "push";
-  const badge = p.result === "win" ? "bg-good/15 text-good" : p.result === "loss" ? "bg-critical/15 text-critical" : "bg-surface-2 text-text-2";
   return (
     <li className="flex items-start gap-2 text-sm">
       <span className="num w-4 shrink-0 text-text-2">{rank}</span>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
           <Link href={`/player/${p.player_id}`} className="truncate font-medium hover:underline">{p.player ?? p.player_id}</Link>
-          <span className="num shrink-0 font-semibold">
-            {p.pick === "over" ? "Over" : "Under"} {fmt(p.line)}
-            {graded && <span className={`ml-1.5 rounded px-1 py-0.5 text-xs font-medium ${badge}`}>{p.result.toUpperCase()}</span>}
-          </span>
+          <span className="num shrink-0 font-semibold">{p.pick === "over" ? "Over" : "Under"} {fmt(p.line)}</span>
         </div>
         <div className="num flex justify-between gap-2 text-xs text-text-2">
           <span className="truncate">{p.team}{p.opp ? ` vs ${p.opp}` : ""}</span>
           <span className="shrink-0">
-            model {fmt(p.predicted)} ({p.edge > 0 ? "+" : ""}{fmt(p.edge)}) · {p.prob == null ? "" : `${Math.round(p.prob * 100)}%`} · {oddsText(p.odds_assumed ? null : p.odds)}
-            {graded && p.actual != null && <> · actual {p.actual}</>}
+            model {fmt(p.predicted)} · line {fmt(p.line)} · <span className="font-medium text-text">{p.edge > 0 ? "+" : ""}{fmt(p.edge)}</span>
+            {!p.odds_assumed && <> · {oddsText(p.odds)}</>}
           </span>
         </div>
       </div>
