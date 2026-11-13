@@ -105,16 +105,21 @@ export type EvalTotals = Record<Target, {
 export type GradedStat = { predicted: number; actual: number; error: number; p10: number; p90: number; baseline: number | null };
 export type GradedPlayer = { player_id: number; name: string; team: string | null } & Partial<Record<Target, GradedStat>>;
 
-export type PickResult = "win" | "loss" | "push" | "no pick";
+export type PickResult = "win" | "loss" | "push" | "no pick" | "void" | "pending";
 export type Kind = "live" | "backtest";
 export type StatKey = Target | "all";
 
-export type Record_ = { wins: number; losses: number; pushes: number; picks: number; win_pct: number | null };
+export type Record_ = {
+  wins: number; losses: number; pushes: number; picks: number; win_pct: number | null;
+  units: number; roi: number | null; expected_units: number; avg_prob: number | null; odds_assumed: number;
+};
 
 export type Pick = {
   date: string; game_id: string; player_id: number; player: string | null; team: string | null; opp: string | null; stat: Target;
-  line: number; open_line: number | null; predicted: number; edge: number; pick: "over" | "under" | null; actual: number;
-  result: PickResult; model_version: string; kind: Kind;
+  line: number; open_line: number | null; over_odds: number | null; under_odds: number | null; predicted: number; p10: number; p90: number;
+  edge: number; pick: "over" | "under" | null; odds: number; odds_assumed: boolean; prob: number | null; market_prob: number | null;
+  ev: number | null; actual: number | null; result: PickResult; units: number | null; top5: boolean; confidence_rank: number | null;
+  model_version: string; kind: Kind;
 };
 
 export type TopPerformer = {
@@ -122,15 +127,25 @@ export type TopPerformer = {
   predicted: number | null; model_rank: number | null; line: number | null; pick: "over" | "under" | null; result: PickResult | null;
 };
 
+export type SimpleRecord = { wins: number; losses: number; pushes: number; picks: number; win_pct: number | null };
+
+export type RunningRow = {
+  date: string; stat: StatKey; day_wins: number; day_losses: number; day_pushes: number; day_units: number;
+  wins: number; losses: number; pushes: number; units: number; expected_units: number; win_pct: number | null;
+};
+
 export type Performance = {
   kind: Kind;
   available: Record<Kind, number>;
   totals: Partial<Record<StatKey, Record_>>;
   no_pick: number;
-  running: ({ date: string; stat: StatKey; day_wins: number; day_losses: number; day_pushes: number } & Omit<Record_, "picks">)[];
+  void: number;
+  running: RunningRow[];
   by_edge: ({ label: string; min: number } & Record_)[];
+  by_confidence: ({ label: string } & Record_)[];
+  confident: { totals: Record_; running: RunningRow[]; picks: Pick[] };
   top_performers: TopPerformer[];
-  top_summary: { nights: number; in_model_top5: Partial<Record<Target, number>>; record: Partial<Record<StatKey, Record_>> } | null;
+  top_summary: { nights: number; in_model_top5: Partial<Record<Target, number>>; record: Partial<Record<StatKey, SimpleRecord>> } | null;
   picks: Pick[];
 };
 

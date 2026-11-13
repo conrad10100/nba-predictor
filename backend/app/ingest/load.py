@@ -48,6 +48,58 @@ def load_season_logs(season: str, since: date | None = None) -> tuple[int, int]:
     if since:
         teams = teams[teams["GAME_DATE"] >= since]
         players = players[players["GAME_DATE"] >= since]
+    return _store_logs(season, teams, players)
+
+
+def load_espn_logs(season: str, dates: list[date]) -> tuple[int, int, list[str]]:
+    """Same as load_season_logs for the listed dates, but from ESPN box scores (for when stats.nba.com is unreachable).
+
+    Games are matched to the stored schedule by date and teams, players to known players by name. A player we have
+    never seen can't be given an NBA id this way and is skipped (returned in the unmatched list).
+    Returns (team-games, player-games, unmatched names).
+    """
+    with SessionLocal() as s:
+        abbr_to_id = {t.abbr: t.id for t in s.scalars(select(Team))}
+        games = {(g.date, g.home_team_id, g.away_team_id): g.id for g in s.scalars(select(Game).where(Game.date.in_(dates)))}
+        players_db = s.scalars(select(Player)).all()
+    by_name: dict[str, list[Player]] = {}
+    for p in players_db:
+        by_name.setdefault(nba_client.normalize_name(p.name), []).append(p)
+    team_rows, player_rows, unmatched = [], [], set()
+    for d in dates:
+        for box in nba_client.espn_box_scores(d):
+            home, away = abbr_to_id.get(box["home"]), abbr_to_id.get(box["away"])
+            game_id = games.get((d, home, away))
+            if game_id is None:
+                continue
+            team_min = 240 + 25 * (box["periods"] - 4)
+            totals = {home: {"MIN": team_min}, away: {"MIN": team_min}}
+            for pl in box["players"]:
+                team_id = abbr_to_id.get(pl["team"])
+                candidates = by_name.get(nba_client.normalize_name(pl["name"]), [])
+                match = next((c for c in candidates if c.team_id == team_id), candidates[0] if len(candidates) == 1 else None)
+                stats = {k.upper(): v for k, v in pl.items() if k not in ("name", "team", "plus_minus")}
+                for k, v in stats.items():
+                    if k != "MIN":
+                        totals[team_id][k] = totals[team_id].get(k, 0) + v
+                if match is None:
+                    unmatched.add(pl["name"])
+                    continue
+                player_rows.append({"GAME_ID": game_id, "GAME_DATE": d, "PLAYER_ID": match.id, "PLAYER_NAME": match.name,
+                                    "TEAM_ID": team_id, "PLUS_MINUS": pl["plus_minus"], **stats})
+            for abbr, tov in box["team_tov"].items():
+                if abbr_to_id.get(abbr) in totals:
+                    totals[abbr_to_id[abbr]]["TOV"] = tov
+            for team_id, t in totals.items():
+                team_rows.append({"GAME_ID": game_id, "GAME_DATE": d, "TEAM_ID": team_id, "MATCHUP": "vs." if team_id == home else "@", **t})
+    if not team_rows:
+        return 0, 0, sorted(unmatched)
+    n_team, n_player = _store_logs(season, pd.DataFrame(team_rows), pd.DataFrame(player_rows))
+    return n_team, n_player, sorted(unmatched)
+
+
+def _store_logs(season: str, teams: pd.DataFrame, players: pd.DataFrame) -> tuple[int, int]:
+    """Upsert games, team box scores and player box scores from frames shaped like the NBA's LeagueGameLog."""
     # The log includes games still in progress. A finished game has >= 240 team minutes (5 x 48) for both sides;
     # anything less is partial, so skip it until a later run sees it complete.
     complete = teams.groupby("GAME_ID")["MIN"].min() >= 240
@@ -168,7 +220,7 @@ def load_player_props(dates: list[date]) -> tuple[int, list[str]]:
             if known[aid] is None:
                 continue
             row = {"player_id": known[aid], "game_id": game_id, "target": prop["target"], "line": prop["line"],
-                   "open_line": prop["open_line"], "espn_athlete_id": aid, "provider": "DraftKings", "source_updated": prop["updated"]}
+                   "open_line": prop["open_line"], "over_odds": prop["over_odds"], "under_odds": prop["under_odds"], "espn_athlete_id": aid, "provider": "DraftKings", "source_updated": prop["updated"]}
             (pre if prop["state"] == "pre" else post).append(row)
     n = upsert(PlayerProp.__table__, pre) + upsert(PlayerProp.__table__, post, update=False)
     return n, sorted(unmatched)
