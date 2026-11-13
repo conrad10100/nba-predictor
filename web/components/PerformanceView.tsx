@@ -6,7 +6,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { LineChart } from "@/components/LineChart";
 import {
   api, fmt, performanceExportUrl, STAT_LABEL, TARGETS,
-  type Kind, type Performance, type Pick as PickRow, type PickResult, type Record_, type RunningRow, type StatKey, type Target,
+  type Kind, type Performance, type Pick as PickRow, type PickResult, type Record_, type RunningRow, type StatKey, type Target, type Top5Method,
 } from "@/lib/api";
 
 // At standard -110 juice you need to win 110/210 of decided picks to break even.
@@ -43,7 +43,7 @@ export function PerformanceView() {
     api.performance("live")
       .then((live) => {
         setData((d) => ({ ...d, live }));
-        const hasLive = live.available.live > 0 || live.confident.picks.length > 0;
+        const hasLive = live.available.live > 0 || live.top5.gap.picks.length > 0;
         setKind(hasLive || live.available.backtest === 0 ? "live" : "backtest");
       })
       .catch((e) => setError(String(e.message ?? e)));
@@ -58,7 +58,7 @@ export function PerformanceView() {
   const perf = kind ? data[kind] : undefined;
   if (error) return <p className="text-critical">{error}</p>;
   if (!kind || !perf) return <p className="text-text-2">Loading performance…</p>;
-  const empty = perf.picks.length === 0 && perf.confident.picks.length === 0;
+  const empty = perf.picks.length === 0 && perf.top5.gap.picks.length === 0;
 
   return (
     <div className="space-y-8">
@@ -174,25 +174,48 @@ function RecordCard({ label, record }: { label: string; record: Record_ }) {
   );
 }
 
+const METHOD: Record<Top5Method, { label: string; title: string; about: string }> = {
+  gap: {
+    label: "Biggest gap vs line",
+    title: "Top 5 player-points picks: biggest gap from the line",
+    about: "Each night, the five player-points props where the model's prediction is furthest from the DraftKings line (e.g. it predicts 30 on a line of 20.5), picking over or under accordingly.",
+  },
+  confidence: {
+    label: "Highest confidence",
+    title: "Top 5 player-points picks: highest confidence",
+    about: "Each night, the five player-points props where the model gives its pick the best chance to win. Like the gap, but a gap counts for less on a player whose scoring swings a lot.",
+  },
+};
+
 function ConfidentSection({ perf }: { perf: Performance }) {
-  const c = perf.confident;
+  const [method, setMethod] = useState<Top5Method>("gap");
+  const c = perf.top5[method];
   const t = c.totals;
   const nights = useMemo(() => [...new Set(c.picks.map((p) => p.date))].sort().reverse(), [c.picks]);
   const [night, setNight] = useState<string | null>(null);
   const shown = night && nights.includes(night) ? night : nights[0];
-  const rows = c.picks.filter((p) => p.date === shown).sort((a, b) => (a.confidence_rank ?? 9) - (b.confidence_rank ?? 9));
+  const rows = c.picks.filter((p) => p.date === shown).sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9));
   const dates = c.running.map((r) => r.date);
+  const other: Top5Method = method === "gap" ? "confidence" : "gap";
+  const o = perf.top5[other].totals;
 
   return (
     <section className="space-y-4">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">Top 5 most confident player-points picks</h2>
-        <p className="max-w-3xl text-sm text-text-2">
-          Each night, the five player-points props where the model is most sure of its over/under pick. Confidence is the model&apos;s
-          chance the pick wins, from its prediction and calibrated 80% range, using only what was known before tip-off. EV is the
-          model&apos;s expected profit at the DraftKings price: if actual units track expected units, the confidence is honest.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">{METHOD[method].title}</h2>
+          <p className="max-w-3xl text-sm text-text-2">
+            {METHOD[method].about} Confidence is the model&apos;s chance the pick wins, from its prediction and calibrated 80% range,
+            using only what was known before tip-off. EV is its expected profit at the DraftKings price.
+          </p>
+        </div>
+        <Toggle value={method} onChange={setMethod} options={(["gap", "confidence"] as const).map((m) => ({ value: m, label: METHOD[m].label }))} />
       </div>
+      {o.picks > 0 && (
+        <p className="text-xs text-text-2">
+          For comparison, {METHOD[other].label.toLowerCase()}: {recordText(o)} (<WinPct value={o.win_pct} />), <Units value={o.units} />.
+        </p>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Tile label="Record" sub={t.picks ? `${t.picks} graded picks over ${dates.length} night${dates.length === 1 ? "" : "s"}` : "no graded picks yet"}>
@@ -237,6 +260,7 @@ function ConfidentSection({ perf }: { perf: Performance }) {
                   <th className="px-4 py-2 font-medium">#</th>
                   <th className="px-3 py-2 font-medium">Player</th>
                   <th className="px-3 py-2 text-right font-medium">Model</th>
+                  <th className="px-3 py-2 text-right font-medium">Gap</th>
                   <th className="px-3 py-2 font-medium">Pick</th>
                   <th className="px-3 py-2 text-right font-medium">DK price</th>
                   <th className="px-3 py-2 text-right font-medium">Confidence</th>
@@ -250,9 +274,10 @@ function ConfidentSection({ perf }: { perf: Performance }) {
               <tbody>
                 {rows.map((p) => (
                   <tr key={`${p.game_id}-${p.player_id}`} className="border-b border-border/60 last:border-0">
-                    <td className="num px-4 py-1.5 text-text-2">{p.confidence_rank}</td>
+                    <td className="num px-4 py-1.5 text-text-2">{p.rank}</td>
                     <td className="px-3 py-1.5"><PlayerCell p={p} /></td>
                     <td className="num px-3 py-1.5 text-right">{fmt(p.predicted)}</td>
+                    <td className="num px-3 py-1.5 text-right text-text-2">{p.edge > 0 ? "+" : ""}{fmt(p.edge)}</td>
                     <td className="num px-3 py-1.5 font-medium"><PickText pick={p.pick} line={p.line} /></td>
                     <td className="num px-3 py-1.5 text-right">{oddsText(p.odds)}{p.odds_assumed && <span className="text-muted">*</span>}</td>
                     <td className="num px-3 py-1.5 text-right">{pctText(p.prob)}</td>
@@ -270,7 +295,7 @@ function ConfidentSection({ perf }: { perf: Performance }) {
         </div>
       )}
 
-      {c.running.length > 0 && <RunningTally rows={c.running} title="Night by night, top 5 picks" />}
+      {c.running.length > 0 && <RunningTally rows={c.running} title={`Night by night, top 5 by ${METHOD[method].label.toLowerCase()}`} />}
     </section>
   );
 }
@@ -465,7 +490,7 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
   const [date, setDate] = useState("all");
   const [stat, setStat] = useState<StatKey>("all");
   const [result, setResult] = useState<"all" | PickResult>("all");
-  const [topOnly, setTopOnly] = useState(false);
+  const [top, setTop] = useState<"all" | Top5Method>("all");
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(PAGE);
 
@@ -473,9 +498,9 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
     const q = query.trim().toLowerCase();
     return picks
       .filter((p) => (date === "all" || p.date === date) && (stat === "all" || p.stat === stat) && (result === "all" || p.result === result)
-        && (!topOnly || p.top5) && (!q || (p.player ?? "").toLowerCase().includes(q) || (p.team ?? "").toLowerCase() === q))
+        && (top === "all" || (top === "gap" ? p.top5_gap : p.top5)) && (!q || (p.player ?? "").toLowerCase().includes(q) || (p.team ?? "").toLowerCase() === q))
       .sort((a, b) => b.date.localeCompare(a.date) || (a.player ?? "").localeCompare(b.player ?? "") || a.stat.localeCompare(b.stat));
-  }, [picks, date, stat, result, topOnly, query]);
+  }, [picks, date, stat, result, top, query]);
   const count = (r: PickResult) => filtered.filter((p) => p.result === r).length;
   const units = filtered.reduce((s, p) => s + (p.units ?? 0), 0);
   const decided = count("win") + count("loss");
@@ -501,9 +526,11 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
           <option value="void">Void</option>
           <option value="no pick">No pick</option>
         </select>
-        <label className="flex items-center gap-1.5 text-sm text-text-2">
-          <input type="checkbox" checked={topOnly} onChange={(e) => { setTopOnly(e.target.checked); reset(); }} /> Top 5 only
-        </label>
+        <select value={top} onChange={(e) => { setTop(e.target.value as "all" | Top5Method); reset(); }} className={select} aria-label="Top 5">
+          <option value="all">All picks</option>
+          <option value="gap">Top 5: biggest gap</option>
+          <option value="confidence">Top 5: highest confidence</option>
+        </select>
         <input
           value={query}
           onChange={(e) => { setQuery(e.target.value); reset(); }}
@@ -540,7 +567,7 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
                 <td className="num px-4 py-1.5 text-text-2">{short(p.date)}</td>
                 <td className="px-3 py-1.5">
                   <PlayerCell p={p} />
-                  {p.top5 && <span className="ml-1.5 rounded bg-accent/15 px-1 text-xs text-accent">top 5</span>}
+                  {(p.top5_gap || p.top5) && <span className="ml-1.5 rounded bg-accent/15 px-1 text-xs text-accent">top 5{p.top5_gap && p.top5 ? "" : p.top5_gap ? " gap" : " conf"}</span>}
                 </td>
                 <td className="px-3 py-1.5">{STAT_LABEL[p.stat]}</td>
                 <td className="num px-3 py-1.5 text-right">

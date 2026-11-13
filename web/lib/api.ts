@@ -118,7 +118,7 @@ export type Pick = {
   date: string; game_id: string; player_id: number; player: string | null; team: string | null; opp: string | null; stat: Target;
   line: number; open_line: number | null; over_odds: number | null; under_odds: number | null; predicted: number; p10: number; p90: number;
   edge: number; pick: "over" | "under" | null; odds: number; odds_assumed: boolean; prob: number | null; market_prob: number | null;
-  ev: number | null; actual: number | null; result: PickResult; units: number | null; top5: boolean; confidence_rank: number | null;
+  ev: number | null; actual: number | null; result: PickResult; units: number | null; top5: boolean; confidence_rank: number | null; top5_gap: boolean; gap_rank: number | null; rank?: number;
   model_version: string; kind: Kind;
 };
 
@@ -134,6 +134,9 @@ export type RunningRow = {
   wins: number; losses: number; pushes: number; units: number; expected_units: number; win_pct: number | null;
 };
 
+export type Top5Method = "gap" | "confidence";
+export type Top5Strategy = { totals: Record_; running: RunningRow[]; picks: Pick[] };
+
 export type Performance = {
   kind: Kind;
   available: Record<Kind, number>;
@@ -143,7 +146,7 @@ export type Performance = {
   running: RunningRow[];
   by_edge: ({ label: string; min: number } & Record_)[];
   by_confidence: ({ label: string } & Record_)[];
-  confident: { totals: Record_; running: RunningRow[]; picks: Pick[] };
+  top5: Record<Top5Method, Top5Strategy>;
   top_performers: TopPerformer[];
   top_summary: { nights: number; in_model_top5: Partial<Record<Target, number>>; record: Partial<Record<StatKey, SimpleRecord>> } | null;
   picks: Pick[];

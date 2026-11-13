@@ -243,11 +243,11 @@ EDGE_BUCKETS = [(0, 1, "Under 1"), (1, 2, "1 to 2"), (2, 3, "2 to 3"), (3, float
 Z80 = 1.2816  # p10..p90 is an 80% range: +/- 1.2816 standard deviations
 DEFAULT_ODDS = -110  # when a line was stored without prices
 TOP_N = 5
-TOP_STAT = "pts"  # the nightly most-confident picks are player points props
+TOP_STAT = "pts"  # the nightly top-5 picks are player points props
 DECIDED = ("win", "loss", "push")
 PICK_COLUMNS = ["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line", "over_odds", "under_odds",
                 "predicted", "p10", "p90", "edge", "pick", "odds", "odds_assumed", "prob", "market_prob", "ev", "actual", "result",
-                "units", "top5", "confidence_rank", "model_version", "kind"]
+                "units", "top5", "confidence_rank", "top5_gap", "gap_rank", "model_version", "kind"]
 
 
 def _payout(odds: pd.Series) -> pd.Series:
@@ -269,7 +269,9 @@ def _picks() -> pd.DataFrame:
       the spread of its calibrated 80% range (p10..p90), with a continuity correction because stats are whole numbers.
     - Units: 1 unit risked per pick at the DraftKings price for that side. EV: the model's expected units per pick,
       prob x payout - P(loss). Market prob: the book's no-vig chance for the same side.
-    - Top 5: each night's five player-points picks with the highest confidence, chosen from everything known before tip-off.
+    - Top 5, two ways, each night among player-points picks and from everything known before tip-off: the five with the
+      highest confidence (top5 / confidence_rank), and the five where the prediction is furthest from the line
+      (top5_gap / gap_rank; ties broken by confidence).
     """
     team, home, away = aliased(Team), aliased(Team), aliased(Team)
     q = (
@@ -323,6 +325,9 @@ def _picks() -> pd.DataFrame:
     points = df["pick"].notna() & (df["stat"] == TOP_STAT)
     df["confidence_rank"] = df[points].groupby(["kind", "date"])["prob"].rank(ascending=False, method="first")
     df["top5"] = df["confidence_rank"] <= TOP_N
+    gap_key = df["edge"].abs() + df["prob"].fillna(0) / 1000  # bigger gap first; confidence breaks ties
+    df["gap_rank"] = gap_key[points].groupby([df["kind"], df["date"]]).rank(ascending=False, method="first")
+    df["top5_gap"] = df["gap_rank"] <= TOP_N
     for c in ("prob", "ev", "market_prob", "units"):
         df[c] = df[c].round(4)
     return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
@@ -401,12 +406,11 @@ def _json_rows(df: pd.DataFrame) -> list[dict]:
 @app.get("/api/performance")
 def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
     """Over/under record, units and EV of the model's picks against DraftKings player props: all picks, each night's
-    top 5 most confident picks, and each night's top 5 performers."""
+    top 5 player-points picks (by biggest gap from the line and by confidence), and each night's top 5 performers."""
     allp = _picks()
     available = {k: int(((allp["kind"] == k) & allp["result"].isin(DECIDED)).sum()) for k in ("live", "backtest")}
     df = allp[allp["kind"] == kind]
     decided = df[df["result"].isin(DECIDED)]
-    top5 = df[df["top5"].fillna(False).astype(bool)]
 
     abs_edge = decided["edge"].abs()
     by_edge = [{"label": label, "min": lo, **_record(decided[(abs_edge >= lo) & (abs_edge < hi)])} for lo, hi, label in EDGE_BUCKETS]
@@ -433,15 +437,20 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
         "running": _running(decided, by_stat=True),
         "by_edge": by_edge,
         "by_confidence": by_confidence,
-        "confident": {
-            "totals": _record(top5),
-            "running": _running(top5, by_stat=False),
-            "picks": _json_rows(top5.sort_values(["date", "confidence_rank"], ascending=[False, True])),
-        },
+        "top5": {name: _strategy(df, flag, rank) for name, flag, rank in
+                 (("gap", "top5_gap", "gap_rank"), ("confidence", "top5", "confidence_rank"))},
         "top_performers": top,
         "top_summary": top_summary,
         "picks": _json_rows(df[df["result"] != "pending"]),
     }
+
+
+def _strategy(df: pd.DataFrame, flag: str, rank: str) -> dict:
+    """One way of picking each night's top 5: its record, night-by-night tally and the picks themselves."""
+    picked = df[df[flag].fillna(False).astype(bool)].copy()
+    picked["rank"] = picked[rank]
+    return {"totals": _record(picked), "running": _running(picked, by_stat=False),
+            "picks": _json_rows(picked.sort_values(["date", "rank"], ascending=[False, True]))}
 
 
 def _record_simple(g: pd.DataFrame) -> dict:
