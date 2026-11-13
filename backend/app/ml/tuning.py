@@ -11,17 +11,19 @@ from app.db import SessionLocal
 from app.ml import xgb
 from app.models import ModelConfig
 
-DEFAULT = {"model": "hgb", "half_life_days": 365, "learning_rate": 0.08, "max_leaf_nodes": 31, "min_samples_leaf": 40, "l2_regularization": 1.0}
+DEFAULT = {"model": "hgb", "half_life_days": 365, "learning_rate": 0.08, "max_leaf_nodes": 31, "min_samples_leaf": 40, "l2_regularization": 1.0,
+           "minutes_weight": 0}
 
 # Variations around the default, one knob at a time; cycled through one per day.
 CANDIDATES = [
+    {"minutes_weight": 1}, {"minutes_weight": 2},  # weight rotation players more (0 = every player counts the same)
     {"half_life_days": 120}, {"half_life_days": 240}, {"half_life_days": 730},
     {"max_leaf_nodes": 15}, {"max_leaf_nodes": 63},
     {"min_samples_leaf": 20}, {"min_samples_leaf": 100},
     {"learning_rate": 0.04}, {"l2_regularization": 5.0},
     {"model": "hgb"}, {"model": "xgboost"},  # algorithm itself competes too (XGBoost only where it's installed)
 ]
-MIN_IMPROVEMENT = 0.005  # challenger must cut holdout MAE by 0.5%+
+MIN_IMPROVEMENT = 0.005  # challenger must cut holdout MAE (on players with DraftKings lines) by 0.5%+
 
 
 def champion(target: str) -> dict:

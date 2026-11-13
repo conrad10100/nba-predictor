@@ -36,10 +36,10 @@ def _fit_week(history: pd.DataFrame, target: str) -> tuple[object, dict, list[st
     cutoff = history["date"].max() - pd.Timedelta(days=HOLDOUT_DAYS)
     train, hold = history[history["date"] <= cutoff], history[history["date"] > cutoff]
     feats = usable_features(train)
-    probe = _model(params).fit(train[feats], train[target], sample_weight=_weights(train["date"], params["half_life_days"]))
+    probe = _model(params).fit(train[feats], train[target], sample_weight=_weights(train, params))
     cal = intervals.fit(hold, target, probe.predict(hold[feats]))
     final = _model(params, int(probe.n_iter_ * 1.1), early_stop=False).fit(
-        history[feats], history[target], sample_weight=_weights(history["date"], params["half_life_days"])
+        history[feats], history[target], sample_weight=_weights(history, params)
     )
     return final, cal, feats
 

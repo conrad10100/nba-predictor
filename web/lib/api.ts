@@ -112,13 +112,22 @@ export type StatKey = Target | "all";
 export type Record_ = {
   wins: number; losses: number; pushes: number; picks: number; win_pct: number | null;
   units: number; roi: number | null; expected_units: number; avg_prob: number | null; odds_assumed: number;
+  clv_n: number; clv_avg: number | null; clv_toward: number | null; clv_away: number | null;
+};
+
+export type VsLine = {
+  n: number; model_mae: number; line_mae: number; model_bias: number; line_bias: number; model_closer: number; line_closer: number;
+};
+export type VsLineReport = {
+  totals: Partial<Record<Kind, Partial<Record<Target, VsLine>>>>;
+  days: ({ date: string; stat: Target; kind: Kind } & VsLine)[];
 };
 
 export type Pick = {
   date: string; game_id: string; player_id: number; player: string | null; team: string | null; opp: string | null; stat: Target;
   line: number; open_line: number | null; over_odds: number | null; under_odds: number | null; predicted: number; p10: number; p90: number;
   edge: number; pick: "over" | "under" | null; odds: number; odds_assumed: boolean; prob: number | null; market_prob: number | null;
-  ev: number | null; actual: number | null; result: PickResult; units: number | null; top5: boolean; confidence_rank: number | null; top5_gap: boolean; gap_rank: number | null; rank?: number;
+  ev: number | null; actual: number | null; result: PickResult; units: number | null; open_pick: "over" | "under" | null; clv: number | null; top5: boolean; confidence_rank: number | null; top5_gap: boolean; gap_rank: number | null; rank?: number;
   model_version: string; kind: Kind;
 };
 
@@ -171,6 +180,7 @@ export const api = {
   evaluation: () => request<{ days: DayEval[]; totals: Record<"live" | "backtest", Partial<EvalTotals>> }>("/api/evaluation"),
   evaluationDay: (date: string) => request<GradedPlayer[]>(`/api/evaluation/${date}`),
   performance: (kind: Kind) => request<Performance>(`/api/performance?kind=${kind}`),
+  accuracyVsLine: () => request<VsLineReport>("/api/accuracy-vs-line"),
   picks: (date: string) => request<{ date: string; picks: Record<Target, Pick[]> }>(`/api/picks?date=${date}`),
 };
 

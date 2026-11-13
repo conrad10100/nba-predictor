@@ -248,7 +248,7 @@ TOP_STAT = "pts"  # the nightly top-5 picks are player points props
 DECIDED = ("win", "loss", "push")
 PICK_COLUMNS = ["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line", "over_odds", "under_odds",
                 "predicted", "p10", "p90", "edge", "pick", "odds", "odds_assumed", "prob", "market_prob", "ev", "actual", "result",
-                "units", "top5", "confidence_rank", "top5_gap", "gap_rank", "model_version", "kind"]
+                "units", "open_pick", "clv", "top5", "confidence_rank", "top5_gap", "gap_rank", "model_version", "kind"]
 
 
 def _payout(odds: pd.Series) -> pd.Series:
@@ -321,6 +321,13 @@ def _picks() -> pd.DataFrame:
     df["units"] = np.select([df["result"] == "win", df["result"] == "loss"], [pay, -1.0], 0.0)
     df.loc[~df["result"].isin(DECIDED), "units"] = np.nan
 
+    # Closing line value: the side the model takes against the opening line, and how far the line then moved
+    # toward it by tip-off (positive = the market moved the model's way, the best early sign of a real edge).
+    open_edge = df["predicted"] - df["open_line"]
+    df["open_pick"] = np.select([open_edge > 0, open_edge < 0], ["over", "under"], None)
+    move = df["line"] - df["open_line"]
+    df["clv"] = np.where(df["open_pick"] == "over", move, np.where(df["open_pick"] == "under", -move, np.nan))
+
     df["kind"] = np.where(df["model_version"].str.startswith(BACKTEST_PREFIX), "backtest", "live")
     df["date"] = pd.to_datetime(df["date"]).dt.date.astype(str)
     points = df["pick"].notna() & (df["stat"] == TOP_STAT)
@@ -329,7 +336,7 @@ def _picks() -> pd.DataFrame:
     gap_key = df["edge"].abs() + df["prob"].fillna(0) / 1000  # bigger gap first; confidence breaks ties
     df["gap_rank"] = gap_key[points].groupby([df["kind"], df["date"]]).rank(ascending=False, method="first")
     df["top5_gap"] = df["gap_rank"] <= TOP_N
-    for c in ("prob", "ev", "market_prob", "units"):
+    for c in ("prob", "ev", "market_prob", "units", "clv"):
         df[c] = df[c].round(4)
     return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
 
@@ -342,7 +349,14 @@ def _record(g: pd.DataFrame) -> dict:
     units, ev = float(g["units"].sum()), float(g["ev"].sum())
     return {"wins": w, "losses": l, "pushes": p, "picks": n, "win_pct": w / (w + l) if w + l else None,
             "units": round(units, 2), "roi": units / n if n else None, "expected_units": round(ev, 2),
-            "avg_prob": float(g["prob"].mean()) if n else None, "odds_assumed": int(g["odds_assumed"].sum())}
+            "avg_prob": float(g["prob"].mean()) if n else None, "odds_assumed": int(g["odds_assumed"].sum()), **_clv(g)}
+
+
+def _clv(g: pd.DataFrame) -> dict:
+    """How the line moved after opening, measured from the side the model took against the opening line."""
+    c = g["clv"].dropna()
+    return {"clv_n": len(c), "clv_avg": float(c.mean()) if len(c) else None,
+            "clv_toward": float((c > 0).mean()) if len(c) else None, "clv_away": float((c < 0).mean()) if len(c) else None}
 
 
 def _running(g: pd.DataFrame, by_stat: bool) -> list[dict]:
@@ -471,6 +485,26 @@ def _strategy(df: pd.DataFrame, flag: str, rank: str) -> dict:
 def _record_simple(g: pd.DataFrame) -> dict:
     w, l, p = (int((g["result"] == r).sum()) for r in DECIDED)
     return {"wins": w, "losses": l, "pushes": p, "picks": w + l + p, "win_pct": w / (w + l) if w + l else None}
+
+
+@app.get("/api/accuracy-vs-line")
+def evaluation_vs_line():
+    """Accuracy on the players DraftKings posts a line for: the model's average miss next to the line's own average
+    miss, per stat, overall and by date (live and backtest separately)."""
+    df = _picks()
+    df = df[~df["result"].isin(["pending", "void"]) & df["actual"].notna()].copy()
+    df["model_err"] = (df["predicted"] - df["actual"]).abs()
+    df["line_err"] = (df["line"] - df["actual"]).abs()
+
+    def summary(g: pd.DataFrame) -> dict:
+        n = len(g)
+        return {"n": n, "model_mae": float(g["model_err"].mean()), "line_mae": float(g["line_err"].mean()),
+                "model_bias": float((g["predicted"] - g["actual"]).mean()), "line_bias": float((g["line"] - g["actual"]).mean()),
+                "model_closer": float((g["model_err"] < g["line_err"]).mean()), "line_closer": float((g["line_err"] < g["model_err"]).mean())}
+
+    totals = {k: {stat: summary(g) for stat, g in gk.groupby("stat")} for k, gk in df.groupby("kind")}
+    days = [{"date": d, "stat": stat, "kind": k, **summary(g)} for (d, stat, k), g in df.groupby(["date", "stat", "kind"])]
+    return _json_safe({"totals": totals, "days": days})
 
 
 @app.get("/api/picks")
