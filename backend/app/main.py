@@ -15,6 +15,7 @@ from sqlalchemy.orm import aliased
 
 from app.clock import today_et
 from app.config import CORS_ORIGINS
+from app.config import TARGETS as STAT_TARGETS
 from app.db import SessionLocal
 from app.features.build import Frames, load_frames
 from app.init_db import init_db
@@ -470,6 +471,21 @@ def _strategy(df: pd.DataFrame, flag: str, rank: str) -> dict:
 def _record_simple(g: pd.DataFrame) -> dict:
     w, l, p = (int((g["result"] == r).sum()) for r in DECIDED)
     return {"wins": w, "losses": l, "pushes": p, "picks": w + l + p, "win_pct": w / (w + l) if w + l else None}
+
+
+@app.get("/api/picks")
+def top_picks(on: date | None = Query(None, alias="date"), n: int = Query(TOP_N, ge=1, le=20)):
+    """Each stat's top picks for one date: the props where the stored pre-game prediction is furthest from the
+    DraftKings line (confidence breaks ties), the same way the Performance page ranks its top 5."""
+    on = on or today_et()
+    df = _picks()
+    df = df[(df["date"] == on.isoformat()) & df["pick"].notna() & (df["result"] != "void")]
+    out = {}
+    for stat in STAT_TARGETS:
+        g = df[df["stat"] == stat]
+        g = g.assign(gap=g["edge"].abs()).sort_values(["gap", "prob"], ascending=[False, False]).head(n)
+        out[stat] = _json_rows(g.drop(columns="gap"))
+    return _json_safe({"date": on.isoformat(), "picks": out})
 
 
 @app.get("/api/performance-export.csv")

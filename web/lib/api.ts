@@ -171,6 +171,7 @@ export const api = {
   evaluation: () => request<{ days: DayEval[]; totals: Record<"live" | "backtest", Partial<EvalTotals>> }>("/api/evaluation"),
   evaluationDay: (date: string) => request<GradedPlayer[]>(`/api/evaluation/${date}`),
   performance: (kind: Kind) => request<Performance>(`/api/performance?kind=${kind}`),
+  picks: (date: string) => request<{ date: string; picks: Record<Target, Pick[]> }>(`/api/picks?date=${date}`),
 };
 
 export const performanceExportUrl = `${API_URL}/api/performance-export.csv`;

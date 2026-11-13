@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { TopPicks } from "@/components/TopPicks";
 import { api, fmt, type PlayerPrediction, type Slate, type SlateGame, type SlateOverrides, type TeamSide } from "@/lib/api";
 
 type SortKey = "pts" | "reb" | "ast" | "pra";
@@ -124,6 +125,8 @@ export function SlateView() {
           ))}
         </div>
       </div>
+
+      {date && <TopPicks date={date} />}
 
       <Filters {...{ conference, setConference, b2bOnly, setB2bOnly, search, setSearch, sortBy, setSortBy, minMinutes, setMinMinutes }} />
 
