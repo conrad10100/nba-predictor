@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { LineChart } from "@/components/LineChart";
+import { VsLineSection } from "@/components/VsLineSection";
 import { api, exportUrl, fmt, pct, STAT_LABEL, TARGETS, type DayEval, type EvalTotals, type GradedPlayer, type Target } from "@/lib/api";
 
 const SEGMENT_LABEL: Record<string, string> = {
@@ -70,6 +71,8 @@ export function AccuracyView() {
               </section>
             ) : null,
           )}
+
+          <VsLineSection />
 
           <section className="grid gap-4 lg:grid-cols-3">
             {TARGETS.map((t) => (

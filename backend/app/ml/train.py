@@ -13,30 +13,57 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from app.clock import today_et
 from app.config import TARGETS as ACTIVE_TARGETS
-from app.db import upsert
+from app.db import SessionLocal, upsert
 from app.features.build import FEATURES, build_features, load_frames, training_rows
 from app.ml import intervals, tuning
 from app.ml.registry import dump
 from app.ml.xgb import XGBModel
-from app.models import ModelRun
+from app.models import ModelRun, PlayerProp
 
 HOLDOUT_DAYS = 21
 MAX_ITER = 800
+NOT_MODEL_PARAMS = ("half_life_days", "model", "minutes_weight")  # training settings, not estimator arguments
+MINUTES_REF = 30.0  # a player averaging this many minutes counts fully under minutes weighting
+ROTATION_MIN = 20.0  # fallback definition of "players with lines" before lines were stored
+MIN_LINE_ROWS = 200  # need this many holdout rows with DraftKings lines to judge on them
 
 
 def _model(params: dict, max_iter: int = MAX_ITER, early_stop: bool = True, **loss):
     if params.get("model") == "xgboost":
         return XGBModel(params, max_iter, early_stop)
-    hgb = {k: v for k, v in params.items() if k not in ("half_life_days", "model")}
+    hgb = {k: v for k, v in params.items() if k not in NOT_MODEL_PARAMS}
     return HistGradientBoostingRegressor(
         **hgb, **loss, max_iter=max_iter, early_stopping=early_stop, n_iter_no_change=25, validation_fraction=0.1, random_state=0
     )
 
 
-def _weights(dates: pd.Series, half_life_days: float) -> np.ndarray:
-    """A game `half_life_days` old counts half as much as last night's."""
-    age = (dates.max() - dates).dt.days.to_numpy()
-    return 0.5 ** (age / half_life_days)
+def _weights(rows: pd.DataFrame, params: dict) -> np.ndarray:
+    """Training weight per game.
+
+    Recency: a game `half_life_days` old counts half as much as last night's.
+    Minutes (when the `minutes_weight` setting is on): rotation players count more, so the model spends its effort on
+    the players DraftKings posts lines for. Uses the player's pre-game last-10 minutes average, never the minutes
+    he went on to play, which would tie the weight to the outcome and bias predictions upward.
+    """
+    age = (rows["date"].max() - rows["date"]).dt.days.to_numpy()
+    w = 0.5 ** (age / params["half_life_days"])
+    k = params.get("minutes_weight", 0)
+    if k:
+        share = (rows["min_l10"].fillna(MINUTES_REF) / MINUTES_REF).clip(0.1, 1.5).to_numpy()
+        w = w * share ** k
+    return w
+
+
+def _focus(hold: pd.DataFrame) -> tuple[np.ndarray, str]:
+    """The holdout rows the model is judged on: players DraftKings posted a line for, since that's where the bets
+    are (bench players are easy to predict and flatter an all-player average). Falls back to rotation players
+    while there are too few lines in the holdout window."""
+    with SessionLocal() as s:
+        keys = set(s.execute(PlayerProp.__table__.select().with_only_columns(PlayerProp.player_id, PlayerProp.game_id)).all())
+    mask = np.array([(p, g) in keys for p, g in zip(hold["player_id"], hold["game_id"])], dtype=bool)
+    if mask.sum() >= MIN_LINE_ROWS:
+        return mask, "players with DraftKings lines"
+    return (hold["min_l10"] >= ROTATION_MIN).to_numpy(), f"rotation players ({ROTATION_MIN:.0f}+ min)"
 
 
 def usable_features(train: pd.DataFrame) -> list[str]:
@@ -49,9 +76,12 @@ def usable_features(train: pd.DataFrame) -> list[str]:
     return [f for f in FEATURES if train[f].notna().any()]
 
 
-def _score(params: dict, train: pd.DataFrame, hold: pd.DataFrame, target: str, feats: list[str]) -> tuple[float, object]:
-    m = _model(params).fit(train[feats], train[target], sample_weight=_weights(train["date"], params["half_life_days"]))
-    return mean_absolute_error(hold[target], m.predict(hold[feats])), m
+def _score(params: dict, train: pd.DataFrame, hold: pd.DataFrame, target: str, feats: list[str],
+           focus: np.ndarray) -> tuple[float, float, object]:
+    """(MAE on the focus players, MAE on everyone, fitted model)."""
+    m = _model(params).fit(train[feats], train[target], sample_weight=_weights(train, params))
+    pred = m.predict(hold[feats])
+    return mean_absolute_error(hold[target][focus], pred[focus]), mean_absolute_error(hold[target], pred), m
 
 
 def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
@@ -59,17 +89,20 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
     train, hold = rows[rows["date"] <= cutoff], rows[rows["date"] > cutoff]
     feats = usable_features(train)
 
-    # 1) Champion vs today's challenger on the most recent weeks, trained only on what came before them.
+    # 1) Champion vs today's challenger on the most recent weeks, trained only on what came before them, judged on
+    #    the players the bets are on.
+    focus, focus_label = _focus(hold)
     champ = tuning.champion(target)
     chall = tuning.challenger(target, champ, today_et())
-    champ_mae, champ_model = _score(champ, train, hold, target, feats)
-    chall_mae, chall_model = _score(chall, train, hold, target, feats) if chall != champ else (np.inf, None)
-    if chall_mae < champ_mae * (1 - tuning.MIN_IMPROVEMENT):
+    champ_focus, champ_mae, champ_model = _score(champ, train, hold, target, feats, focus)
+    chall_focus, chall_mae, chall_model = _score(chall, train, hold, target, feats, focus) if chall != champ else (np.inf, np.inf, None)
+    judged = f"MAE on {focus_label} (n={int(focus.sum())})"
+    if chall_focus < champ_focus * (1 - tuning.MIN_IMPROVEMENT):
         params, point, mae = chall, chall_model, chall_mae
-        note = f"challenger won: MAE {chall_mae:.3f} < {champ_mae:.3f} with {_diff(champ, chall)}"
+        note = f"challenger won: {judged} {chall_focus:.3f} < {champ_focus:.3f} with {_diff(champ, chall)}"
     else:
         params, point, mae = champ, champ_model, champ_mae
-        note = f"champion kept: MAE {champ_mae:.3f} vs challenger {_diff(champ, chall)} {chall_mae:.3f}"
+        note = f"champion kept: {judged} {champ_focus:.3f} vs challenger {_diff(champ, chall)} {chall_focus:.3f}"
     tuning.save_champion(target, params, note)
 
     pred = point.predict(hold[feats])
@@ -85,7 +118,7 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
     importance = dict(sorted(zip(feats, imp.importances_mean.round(4).tolist()), key=lambda kv: -kv[1]))
 
     # 2) Refit on everything with the tree count found above (more data -> ~10% more trees).
-    w_all = _weights(rows["date"], params["half_life_days"])
+    w_all = _weights(rows, params)
     n_iter = int(point.n_iter_ * 1.1)
     X, y = rows[feats], rows[target]
     bundle = {

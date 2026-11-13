@@ -28,6 +28,18 @@ function Units({ value, className = "" }: { value: number | null | undefined; cl
   return <span className={`num ${cls} ${className}`}>{v > 0 ? "+" : ""}{v.toFixed(2)}u</span>;
 }
 
+/** Closing line value: did the line move toward the side the model took against the opening line? */
+function ClvText({ r }: { r: Pick<Record_, "clv_n" | "clv_avg" | "clv_toward" | "clv_away"> }) {
+  if (!r.clv_n || r.clv_avg == null) return <span className="text-muted">–</span>;
+  const good = (r.clv_toward ?? 0) > (r.clv_away ?? 0);
+  return (
+    <span className="num">
+      <span className={good ? "text-good" : "text-critical"}>{pctText(r.clv_toward)} toward</span>
+      <span className="text-text-2"> / {pctText(r.clv_away)} away · avg {r.clv_avg >= 0 ? "+" : ""}{r.clv_avg.toFixed(2)}</span>
+    </span>
+  );
+}
+
 function WinPct({ value, className = "" }: { value: number | null; className?: string }) {
   if (value == null) return <span className={className}>–</span>;
   return <span className={`${value >= BREAK_EVEN ? "text-good" : "text-critical"} ${className}`}>{(value * 100).toFixed(1)}%</span>;
@@ -169,6 +181,8 @@ function RecordCard({ label, record }: { label: string; record: Record_ }) {
         <dt className="text-text-2">Units</dt><dd className="text-right"><Units value={record.units} /></dd>
         <dt className="text-text-2">ROI</dt><dd className="text-right">{pctText(record.roi, 1)}</dd>
         <dt className="text-text-2">Expected (EV)</dt><dd className="text-right"><Units value={record.expected_units} /></dd>
+        <dt className="col-span-2 mt-1 text-xs text-text-2">Line move after open (CLV)</dt>
+        <dd className="col-span-2 text-xs"><ClvText r={record} /></dd>
       </dl>
     </div>
   );
@@ -231,6 +245,11 @@ function ConfidentSection({ perf }: { perf: Performance }) {
           <Units value={t.expected_units} />
         </Tile>
       </div>
+      <p className="text-sm text-text-2">
+        <span className="font-medium text-text">Closing line value:</span> after the line opened, it moved toward the model&apos;s side vs
+        away from it: <ClvText r={t} />. Lines that keep moving toward the model&apos;s side are the best early sign of a real edge,
+        long before the win-loss record settles.
+      </p>
 
       {dates.length >= 2 && (
         <LineChart
@@ -544,13 +563,14 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
         </span>
       </div>
       <div className="max-h-[640px] overflow-auto">
-        <table className="w-full min-w-[1040px] whitespace-nowrap text-sm">
+        <table className="w-full min-w-[1120px] whitespace-nowrap text-sm">
           <thead className="sticky top-0 bg-surface text-left text-xs text-text-2">
             <tr className="border-b border-border">
               <th className="px-4 py-2 font-medium">Night</th>
               <th className="px-3 py-2 font-medium">Player</th>
               <th className="px-3 py-2 font-medium">Stat</th>
               <th className="px-3 py-2 text-right font-medium">DK line</th>
+              <th className="px-3 py-2 text-right font-medium" title="How far the line moved after opening, toward (+) or away from (−) the side the model took against the opening line">Line move</th>
               <th className="px-3 py-2 text-right font-medium">Over / under</th>
               <th className="px-3 py-2 text-right font-medium">Model</th>
               <th className="px-3 py-2 font-medium">Pick</th>
@@ -574,6 +594,9 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
                   {fmt(p.line)}
                   {p.open_line != null && p.open_line !== p.line && <span className="ml-1 text-xs text-muted">(opened {fmt(p.open_line)})</span>}
                 </td>
+                <td className={`num px-3 py-1.5 text-right ${p.clv == null || p.clv === 0 ? "text-text-2" : p.clv > 0 ? "text-good" : "text-critical"}`}>
+                  {p.clv == null ? "–" : p.clv === 0 ? "0" : `${p.clv > 0 ? "+" : ""}${fmt(p.clv)}`}
+                </td>
                 <td className="num px-3 py-1.5 text-right text-text-2">{oddsText(p.over_odds)} / {oddsText(p.under_odds)}</td>
                 <td className="num px-3 py-1.5 text-right">{fmt(p.predicted)}</td>
                 <td className="num px-3 py-1.5"><PickText pick={p.pick} line={p.line} /></td>
@@ -584,7 +607,7 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
                 <td className="num px-4 py-1.5 text-right"><Units value={p.units} /></td>
               </tr>
             ))}
-            {filtered.length === 0 && <tr><td colSpan={12} className="px-4 py-3 text-text-2">No picks match these filters.</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={13} className="px-4 py-3 text-text-2">No picks match these filters.</td></tr>}
           </tbody>
         </table>
       </div>
