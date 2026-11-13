@@ -5,6 +5,7 @@ from threading import Lock
 
 import numpy as np
 import pandas as pd
+from scipy.special import ndtr
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -239,48 +240,119 @@ def evaluation_export():
 # ---------------------------------------------------------------- performance vs. DraftKings lines
 
 EDGE_BUCKETS = [(0, 1, "Under 1"), (1, 2, "1 to 2"), (2, 3, "2 to 3"), (3, float("inf"), "3 or more")]
-PICK_COLUMNS = ["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line", "predicted", "edge", "pick",
-                "actual", "result", "model_version", "kind"]
+Z80 = 1.2816  # p10..p90 is an 80% range: +/- 1.2816 standard deviations
+DEFAULT_ODDS = -110  # when a line was stored without prices
+TOP_N = 5
+TOP_STAT = "pts"  # the nightly most-confident picks are player points props
+DECIDED = ("win", "loss", "push")
+PICK_COLUMNS = ["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line", "over_odds", "under_odds",
+                "predicted", "p10", "p90", "edge", "pick", "odds", "odds_assumed", "prob", "market_prob", "ev", "actual", "result",
+                "units", "top5", "confidence_rank", "model_version", "kind"]
+
+
+def _payout(odds: pd.Series) -> pd.Series:
+    """Profit on a 1-unit stake at American odds: -110 pays 0.909, +120 pays 1.2."""
+    return pd.Series(np.where(odds > 0, odds / 100, 100 / odds.abs()), index=odds.index)
+
+
+def _implied(odds: pd.Series) -> pd.Series:
+    return pd.Series(np.where(odds > 0, 100 / (odds + 100), -odds / (-odds + 100)), index=odds.index)
 
 
 def _picks() -> pd.DataFrame:
-    """Every graded prediction that has a DraftKings line, with the model's over/under pick and how it turned out.
+    """Every prediction that has a DraftKings line, with the model's over/under pick, how confident it is and how it did.
 
-    The pick is "over" when the prediction is above the line and "under" when below (no pick when exactly on it).
-    A pick wins when the actual stat lands on that side of the line; landing exactly on the line is a push.
+    - Pick: "over" when the prediction is above the line, "under" when below (no pick when exactly on it).
+    - Result: win when the player finishes on the picked side, push on the line, void if he didn't play (the book
+      refunds it), pending until the game is final.
+    - Confidence (prob): the model's chance the pick wins, treating the outcome as normal around the prediction with
+      the spread of its calibrated 80% range (p10..p90), with a continuity correction because stats are whole numbers.
+    - Units: 1 unit risked per pick at the DraftKings price for that side. EV: the model's expected units per pick,
+      prob x payout - P(loss). Market prob: the book's no-vig chance for the same side.
+    - Top 5: each night's five player-points picks with the highest confidence, chosen from everything known before tip-off.
     """
-    team, opp = aliased(Team), aliased(Team)
+    team, home, away = aliased(Team), aliased(Team), aliased(Team)
     q = (
-        select(Prediction.game_date, Prediction.game_id, Prediction.player_id, Player.name, team.abbr, opp.abbr, Prediction.target,
-               PlayerProp.line, PlayerProp.open_line, Prediction.predicted, Prediction.actual, Prediction.model_version)
+        select(Prediction.game_date, Prediction.game_id, Prediction.player_id, Player.name, Player.team_id, team.abbr, home.abbr, away.abbr,
+               Game.home_team_id, Game.status, Prediction.target, PlayerProp.line, PlayerProp.open_line, PlayerProp.over_odds,
+               PlayerProp.under_odds, Prediction.predicted, Prediction.p10, Prediction.p90, Prediction.actual, Prediction.model_version)
         .join(PlayerProp, and_(PlayerProp.player_id == Prediction.player_id, PlayerProp.game_id == Prediction.game_id,
                                PlayerProp.target == Prediction.target))
+        .join(Game, Game.id == Prediction.game_id)
+        .join(home, home.id == Game.home_team_id, isouter=True)
+        .join(away, away.id == Game.away_team_id, isouter=True)
         .join(Player, Player.id == Prediction.player_id, isouter=True)
-        .join(PlayerGameStat, and_(PlayerGameStat.player_id == Prediction.player_id, PlayerGameStat.game_id == Prediction.game_id), isouter=True)
-        .join(team, team.id == PlayerGameStat.team_id, isouter=True)
-        .join(opp, opp.id == PlayerGameStat.opp_team_id, isouter=True)
-        .where(Prediction.actual.is_not(None))
+        .join(team, team.id == Player.team_id, isouter=True)
     )
     with SessionLocal() as s:
-        df = pd.DataFrame(s.execute(q).all(), columns=["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line",
-                                                        "predicted", "actual", "model_version"])
+        df = pd.DataFrame(s.execute(q).all(), columns=[
+            "date", "game_id", "player_id", "player", "team_id", "team", "home", "away", "home_team_id", "status", "stat", "line",
+            "open_line", "over_odds", "under_odds", "predicted", "p10", "p90", "actual", "model_version"])
     if df.empty:
         return pd.DataFrame(columns=PICK_COLUMNS)
+    df["opp"] = np.where(df["team_id"] == df["home_team_id"], df["away"], df["home"])
     df["predicted"] = df["predicted"].round(1)  # pick off the shown prediction so the table can be checked by eye
     df["edge"] = (df["predicted"] - df["line"]).round(1)
-    df["pick"] = np.select([df["edge"] > 0, df["edge"] < 0], ["over", "under"], None)
+    over = df["edge"] > 0
+    df["pick"] = np.select([over, df["edge"] < 0], ["over", "under"], None)
+
+    sigma = ((df["p90"] - df["p10"]) / (2 * Z80)).clip(lower=0.5)
+    p_over = 1 - ndtr((np.floor(df["line"]) + 0.5 - df["predicted"]) / sigma)  # finishes at floor(line)+1 or more
+    p_under = ndtr((np.ceil(df["line"]) - 0.5 - df["predicted"]) / sigma)  # finishes at ceil(line)-1 or less
+    df["prob"] = np.where(df["pick"].isna(), np.nan, np.where(over, p_over, p_under))
+    p_loss = np.where(over, p_under, p_over)
+    pick_odds = pd.Series(np.where(over, df["over_odds"], df["under_odds"]), index=df.index, dtype="float")
+    df["odds_assumed"] = pick_odds.isna() & df["pick"].notna()
+    df["odds"] = pick_odds.fillna(DEFAULT_ODDS)
+    pay = _payout(df["odds"])
+    df["ev"] = np.where(df["pick"].isna(), np.nan, df["prob"] * pay - p_loss)
+    other = pd.Series(np.where(over, df["under_odds"], df["over_odds"]), index=df.index, dtype="float")
+    df["market_prob"] = _implied(pick_odds) / (_implied(pick_odds) + _implied(other))  # NaN without both prices
+
+    final = df["status"] == "final"
     over_hit, under_hit = df["actual"] > df["line"], df["actual"] < df["line"]
     df["result"] = np.select(
-        [df["pick"].isna(), df["actual"] == df["line"], (df["pick"] == "over") & over_hit, (df["pick"] == "under") & under_hit],
-        ["no pick", "push", "win", "win"], "loss")
+        [~final, df["actual"].isna(), df["pick"].isna(), df["actual"] == df["line"],
+         ((df["pick"] == "over") & over_hit) | ((df["pick"] == "under") & under_hit)],
+        ["pending", "void", "no pick", "push", "win"], "loss")
+    df["units"] = np.select([df["result"] == "win", df["result"] == "loss"], [pay, -1.0], 0.0)
+    df.loc[~df["result"].isin(DECIDED), "units"] = np.nan
+
     df["kind"] = np.where(df["model_version"].str.startswith(BACKTEST_PREFIX), "backtest", "live")
     df["date"] = pd.to_datetime(df["date"]).dt.date.astype(str)
+    points = df["pick"].notna() & (df["stat"] == TOP_STAT)
+    df["confidence_rank"] = df[points].groupby(["kind", "date"])["prob"].rank(ascending=False, method="first")
+    df["top5"] = df["confidence_rank"] <= TOP_N
+    for c in ("prob", "ev", "market_prob", "units"):
+        df[c] = df[c].round(4)
     return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
 
 
 def _record(g: pd.DataFrame) -> dict:
-    w, l, p = (int((g["result"] == r).sum()) for r in ("win", "loss", "push"))
-    return {"wins": w, "losses": l, "pushes": p, "picks": w + l + p, "win_pct": w / (w + l) if w + l else None}
+    """Win-loss record, units won at the DraftKings price, and expected units (the model's EV) for decided picks."""
+    g = g[g["result"].isin(DECIDED)]
+    w, l, p = (int((g["result"] == r).sum()) for r in DECIDED)
+    n = w + l + p
+    units, ev = float(g["units"].sum()), float(g["ev"].sum())
+    return {"wins": w, "losses": l, "pushes": p, "picks": n, "win_pct": w / (w + l) if w + l else None,
+            "units": round(units, 2), "roi": units / n if n else None, "expected_units": round(ev, 2),
+            "avg_prob": float(g["prob"].mean()) if n else None, "odds_assumed": int(g["odds_assumed"].sum())}
+
+
+def _running(g: pd.DataFrame, by_stat: bool) -> list[dict]:
+    out, cum = [], {}
+    for d, day_df in g[g["result"].isin(DECIDED)].groupby("date"):
+        groups = [("all", day_df), *day_df.groupby("stat")] if by_stat else [("all", day_df)]
+        for stat, gs in groups:
+            day = _record(gs)
+            c = cum.setdefault(stat, {"wins": 0, "losses": 0, "pushes": 0, "units": 0.0, "expected_units": 0.0})
+            for k in c:
+                c[k] += day[k]
+            out.append({"date": d, "stat": stat, "day_wins": day["wins"], "day_losses": day["losses"], "day_pushes": day["pushes"],
+                        "day_units": day["units"], "wins": c["wins"], "losses": c["losses"], "pushes": c["pushes"],
+                        "units": round(c["units"], 2), "expected_units": round(c["expected_units"], 2),
+                        "win_pct": c["wins"] / (c["wins"] + c["losses"]) if c["wins"] + c["losses"] else None})
+    return out
 
 
 def _top_performers(kind: str, picks: pd.DataFrame) -> list[dict]:
@@ -322,27 +394,26 @@ def _top_performers(kind: str, picks: pd.DataFrame) -> list[dict]:
     return out
 
 
+def _json_rows(df: pd.DataFrame) -> list[dict]:
+    return df.astype(object).where(df.notna(), None).to_dict("records")
+
+
 @app.get("/api/performance")
 def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
-    """Over/under record of the model's predictions against DraftKings player prop lines, plus each night's top 5 performers."""
+    """Over/under record, units and EV of the model's picks against DraftKings player props: all picks, each night's
+    top 5 most confident picks, and each night's top 5 performers."""
     allp = _picks()
-    available = {k: int((allp["kind"] == k).sum()) for k in ("live", "backtest")}
+    available = {k: int(((allp["kind"] == k) & allp["result"].isin(DECIDED)).sum()) for k in ("live", "backtest")}
     df = allp[allp["kind"] == kind]
-    graded = df[df["result"] != "no pick"]
+    decided = df[df["result"].isin(DECIDED)]
+    top5 = df[df["top5"].fillna(False).astype(bool)]
 
-    running, cum = [], {}
-    for d, g in graded.groupby("date"):
-        for stat, gs in [("all", g), *g.groupby("stat")]:
-            day = _record(gs)
-            c = cum.setdefault(stat, {"wins": 0, "losses": 0, "pushes": 0})
-            for k in c:
-                c[k] += day[k]
-            running.append({"date": d, "stat": stat, "day_wins": day["wins"], "day_losses": day["losses"], "day_pushes": day["pushes"],
-                            "wins": c["wins"], "losses": c["losses"], "pushes": c["pushes"],
-                            "win_pct": c["wins"] / (c["wins"] + c["losses"]) if c["wins"] + c["losses"] else None})
-
-    abs_edge = graded["edge"].abs()
-    by_edge = [{"label": label, "min": lo, **_record(graded[(abs_edge >= lo) & (abs_edge < hi)])} for lo, hi, label in EDGE_BUCKETS]
+    abs_edge = decided["edge"].abs()
+    by_edge = [{"label": label, "min": lo, **_record(decided[(abs_edge >= lo) & (abs_edge < hi)])} for lo, hi, label in EDGE_BUCKETS]
+    prob = decided["prob"]
+    by_confidence = [{"label": label, **_record(decided[(prob >= lo) & (prob < hi)])}
+                     for lo, hi, label in [(0, 0.55, "Under 55%"), (0.55, 0.6, "55–60%"), (0.6, 0.65, "60–65%"), (0.65, 0.7, "65–70%"),
+                                           (0.7, 1.01, "70%+")]]
     top = _top_performers(kind, allp)
     top_df = pd.DataFrame(top)
     top_summary = None
@@ -350,24 +421,36 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
         nights = top_df.groupby(["date", "stat"])["model_rank"].apply(lambda r: int((r <= 5).sum()))
         top_summary = {
             "nights": int(top_df["date"].nunique()),
-            "in_model_top5": {stat: float(v.mean()) for stat, v in nights.groupby(level="stat")},  # avg of the 5 the model also had top 5
-            "record": {stat: _record(g[g["result"].isin(["win", "loss", "push"])]) for stat, g in [("all", top_df), *top_df.groupby("stat")]},
+            "in_model_top5": {stat: float(v.mean()) for stat, v in nights.groupby(level="stat")},
+            "record": {stat: _record_simple(g) for stat, g in [("all", top_df), *top_df.groupby("stat")]},
         }
     return {
         "kind": kind,
         "available": available,
-        "totals": {stat: _record(g) for stat, g in [("all", graded), *graded.groupby("stat")]},
+        "totals": {stat: _record(g) for stat, g in [("all", decided), *decided.groupby("stat")]},
         "no_pick": int((df["result"] == "no pick").sum()),
-        "running": running,
+        "void": int((df["result"] == "void").sum()),
+        "running": _running(decided, by_stat=True),
         "by_edge": by_edge,
+        "by_confidence": by_confidence,
+        "confident": {
+            "totals": _record(top5),
+            "running": _running(top5, by_stat=False),
+            "picks": _json_rows(top5.sort_values(["date", "confidence_rank"], ascending=[False, True])),
+        },
         "top_performers": top,
         "top_summary": top_summary,
-        "picks": df.replace({np.nan: None}).to_dict("records"),
+        "picks": _json_rows(df[df["result"] != "pending"]),
     }
+
+
+def _record_simple(g: pd.DataFrame) -> dict:
+    w, l, p = (int((g["result"] == r).sum()) for r in DECIDED)
+    return {"wins": w, "losses": l, "pushes": p, "picks": w + l + p, "win_pct": w / (w + l) if w + l else None}
 
 
 @app.get("/api/performance-export.csv")
 def performance_export():
-    """Every graded over/under pick against the DraftKings line, live and backtest."""
+    """Every over/under pick against the DraftKings line (live and backtest), with confidence, price, EV and units."""
     return Response(_picks().to_csv(index=False), media_type="text/csv",
                     headers={"Content-Disposition": 'attachment; filename="over-under-picks.csv"'})

@@ -155,6 +155,8 @@ class PlayerProp(Base):
     target: Mapped[str] = mapped_column(String(4), primary_key=True)  # pts | reb | ast
     line: Mapped[float] = mapped_column(Float)
     open_line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    over_odds: Mapped[int | None] = mapped_column(Integer, nullable=True)  # American odds, e.g. -115
+    under_odds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     espn_athlete_id: Mapped[int] = mapped_column(Integer, index=True)
     provider: Mapped[str] = mapped_column(String(32), default="DraftKings")
     source_updated: Mapped[str | None] = mapped_column(String(32), nullable=True)  # ESPN's lastUpdated for the line

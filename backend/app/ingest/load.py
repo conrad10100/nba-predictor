@@ -220,7 +220,7 @@ def load_player_props(dates: list[date]) -> tuple[int, list[str]]:
             if known[aid] is None:
                 continue
             row = {"player_id": known[aid], "game_id": game_id, "target": prop["target"], "line": prop["line"],
-                   "open_line": prop["open_line"], "espn_athlete_id": aid, "provider": "DraftKings", "source_updated": prop["updated"]}
+                   "open_line": prop["open_line"], "over_odds": prop["over_odds"], "under_odds": prop["under_odds"], "espn_athlete_id": aid, "provider": "DraftKings", "source_updated": prop["updated"]}
             (pre if prop["state"] == "pre" else post).append(row)
     n = upsert(PlayerProp.__table__, pre) + upsert(PlayerProp.__table__, post, update=False)
     return n, sorted(unmatched)

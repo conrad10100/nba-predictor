@@ -150,21 +150,37 @@ def espn_player_props(on: date) -> list[dict]:
         comp = event["competitions"][0]
         side = {t["homeAway"]: t["team"] for t in comp["competitors"]}
         abbr = {k: ESPN_TO_NBA_ABBR.get(t["abbreviation"], t["abbreviation"]) for k, t in side.items()}
-        seen = set()
+        # ESPN lists each player's line as a pair of entries without saying which side is which: the over comes
+        # first, then the under (checked against the over-only "Milestones" markets' prices).
+        pairs: dict[tuple[int, str], list[dict]] = {}
         for item in _prop_bets(event["id"]):
             target = PROP_MARKETS.get(item.get("type", {}).get("name"))
             athlete = _ref_id(item.get("athlete", {}).get("$ref", ""), "athletes")
-            line = (item.get("current") or {}).get("target", {}).get("value")
-            if target is None or athlete is None or line is None or (athlete, target) in seen:
+            if target is None or athlete is None or (item.get("current") or {}).get("target", {}).get("value") is None:
                 continue
-            seen.add((athlete, target))
+            pairs.setdefault((athlete, target), []).append(item)
+        for (athlete, target), items in pairs.items():
+            first = items[0]
+            same_line = len(items) == 2 and items[1]["current"]["target"]["value"] == first["current"]["target"]["value"]
             out.append({
                 "home": abbr["home"], "away": abbr["away"], "state": event["status"]["type"]["state"],
                 "espn_team_ids": [side["home"]["id"], side["away"]["id"]], "espn_athlete_id": athlete, "target": target,
-                "line": float(line), "open_line": _float((item.get("open") or {}).get("target", {}).get("value")),
-                "updated": item.get("lastUpdated"),
+                "line": float(first["current"]["target"]["value"]),
+                "open_line": _float((first.get("open") or {}).get("target", {}).get("value")),
+                "over_odds": _american(first) if same_line else None, "under_odds": _american(items[1]) if same_line else None,
+                "updated": first.get("lastUpdated"),
             })
     return out
+
+
+def _american(item: dict) -> int | None:
+    v = str(((item.get("odds") or {}).get("american") or {}).get("value", "")).strip().upper()
+    if v in ("EVEN", "EV"):
+        return 100
+    try:
+        return int(float(v))
+    except ValueError:
+        return None
 
 
 def _prop_bets(event_id: str) -> list[dict]:
