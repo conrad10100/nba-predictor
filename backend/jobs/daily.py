@@ -16,7 +16,8 @@ from app.config import CURRENT_SEASON
 from app.db import engine
 from app.features.build import load_frames
 from app.ingest.load import (
-    dates_missing_props, load_game_lines, load_injuries, load_player_props, load_players, load_schedule, load_season_logs,
+    dates_missing_props, load_espn_logs, load_game_lines, load_injuries, load_player_props, load_players, load_schedule,
+    load_season_logs,
 )
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
@@ -83,12 +84,24 @@ def _ingest(today) -> bool:
     try:
         n_team, n_player = load_season_logs(CURRENT_SEASON, since=today - timedelta(days=RELOAD_DAYS))
         log.info("box scores: %d team-games, %d player-games", n_team, n_player)
+    except Exception:
+        log.exception("box scores: stats.nba.com failed; falling back to ESPN box scores")
+        # Same host as the box scores, so don't wait out the same timeouts for rosters and the schedule
+        # (the schedule is already stored through the end of the season).
+        try:
+            dates = [today - timedelta(days=i) for i in range(RELOAD_DAYS, 0, -1)]
+            n_team, n_player, unmatched = load_espn_logs(CURRENT_SEASON, dates)
+            log.info("box scores (ESPN): %d team-games, %d player-games, %d unmatched %s", n_team, n_player, len(unmatched), unmatched[:10])
+            return True
+        except Exception:
+            log.exception("box scores: ESPN fallback failed too; continuing with the data already stored")
+            return False
+    try:
         load_players(CURRENT_SEASON)
         load_schedule(CURRENT_SEASON)
-        return True
     except Exception:
-        log.exception("box scores: download from stats.nba.com failed; continuing with the data already stored")
-        return False
+        log.exception("rosters/schedule: stats.nba.com failed; keeping what's stored")
+    return True
 
 
 def _missing_last_night(today) -> bool:

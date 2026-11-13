@@ -82,7 +82,56 @@ def espn_game_lines(on: date) -> list[dict]:
     return out
 
 
-ESPN_CORE_URL = "https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba"
+ESPN_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+
+
+def espn_box_scores(on: date) -> list[dict]:
+    """Box scores for a date's finished games, from ESPN (fallback when stats.nba.com is unreachable).
+
+    [{home, away, periods, players: [{name, team, min, pts, fgm, fga, ...}]}] with NBA team abbreviations.
+    """
+    board = _call(lambda: requests.get(ESPN_SCOREBOARD_URL, params={"dates": on.strftime("%Y%m%d")}, timeout=30).json())
+    out = []
+    for event in board.get("events", []):
+        status = event["status"]
+        if not status["type"].get("completed"):
+            continue
+        comp = event["competitions"][0]
+        side = {t["homeAway"]: ESPN_TO_NBA_ABBR.get(t["team"]["abbreviation"], t["team"]["abbreviation"]) for t in comp["competitors"]}
+        summary = _call(lambda: requests.get(ESPN_SUMMARY_URL, params={"event": event["id"]}, timeout=30).json())
+        players = []
+        for team in summary.get("boxscore", {}).get("players", []):
+            abbr = ESPN_TO_NBA_ABBR.get(team["team"]["abbreviation"], team["team"]["abbreviation"])
+            block = team["statistics"][0]
+            for a in block["athletes"]:
+                if not a.get("stats"):  # did not play
+                    continue
+                v = dict(zip(block["keys"], a["stats"]))
+                fgm, fga = _made_attempted(v["fieldGoalsMade-fieldGoalsAttempted"])
+                fg3m, fg3a = _made_attempted(v["threePointFieldGoalsMade-threePointFieldGoalsAttempted"])
+                ftm, fta = _made_attempted(v["freeThrowsMade-freeThrowsAttempted"])
+                players.append({
+                    "name": a["athlete"]["displayName"], "team": abbr, "min": _float(v["minutes"]) or 0.0,
+                    "pts": int(v["points"]), "reb": int(v["rebounds"]), "oreb": int(v["offensiveRebounds"]),
+                    "dreb": int(v["defensiveRebounds"]), "ast": int(v["assists"]), "stl": int(v["steals"]), "blk": int(v["blocks"]),
+                    "tov": int(v["turnovers"]), "pf": int(v["fouls"]), "fgm": fgm, "fga": fga, "fg3m": fg3m, "fg3a": fg3a,
+                    "ftm": ftm, "fta": fta, "plus_minus": _float(v.get("plusMinus")),
+                })
+        # Team turnovers (e.g. shot-clock violations) aren't charged to a player, so take the team total from the team box.
+        team_tov = {ESPN_TO_NBA_ABBR.get(t["team"]["abbreviation"], t["team"]["abbreviation"]):
+                    int({x["name"]: x["displayValue"] for x in t["statistics"]}.get("totalTurnovers", 0))
+                    for t in summary.get("boxscore", {}).get("teams", [])}
+        out.append({"home": side["home"], "away": side["away"], "periods": max(4, int(status.get("period") or 4)),
+                    "players": players, "team_tov": team_tov})
+    return out
+
+
+def _made_attempted(v: str) -> tuple[int, int]:
+    made, attempted = v.split("-")
+    return int(made), int(attempted)
+
+
+ESPN_CORE_URL ="https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba"
 ESPN_ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{team_id}/roster"
 DRAFTKINGS_PROVIDER_ID = 100  # ESPN's odds provider id for DraftKings
 # ESPN prop market name -> our stat. Each player gets two rows per market (over and under) at the same line.
