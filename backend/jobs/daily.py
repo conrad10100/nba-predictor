@@ -9,7 +9,7 @@ import logging
 import sys
 from datetime import timedelta
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from app.clock import today_et
 from app.config import CURRENT_SEASON
@@ -22,6 +22,7 @@ from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
 from app.ml.train import train_all
+from app.models import Game
 
 log = logging.getLogger("daily")
 
@@ -38,14 +39,18 @@ WHERE actual IS NULL AND EXISTS (
 """)
 
 
-def run(refresh_only: bool = False) -> None:
+def run(refresh_only: bool = False) -> bool:
+    """Returns False if the box-score download failed (everything else still runs)."""
     today = today_et()
     init_db()
+    # stats.nba.com sometimes times out or blocks cloud IPs. Don't lose the whole day to it: still store injuries,
+    # lines and props and predict today's slate with the current models, then report the failure. The 5pm refresh
+    # tries the download again if last night's games are still missing.
+    ingest_ok = True
+    if not refresh_only or _missing_last_night(today):
+        ingest_ok = _ingest(today)
+
     if not refresh_only:
-        n_team, n_player = load_season_logs(CURRENT_SEASON, since=today - timedelta(days=RELOAD_DAYS))
-        log.info("box scores: %d team-games, %d player-games", n_team, n_player)
-        load_players(CURRENT_SEASON)
-        load_schedule(CURRENT_SEASON)
         with engine.begin() as conn:
             log.info("filled actuals on %d predictions", conn.execute(FILL_ACTUALS).rowcount)
         for e in evaluate_pending(today):
@@ -65,12 +70,32 @@ def run(refresh_only: bool = False) -> None:
     except Exception:
         log.exception("player props: failed, continuing without them")
 
-    if not refresh_only:
+    if not refresh_only and ingest_ok:  # no new box scores means nothing new to learn from
         for r in train_all():
             log.info("%s: MAE %.2f vs baseline %.2f promoted=%s", r["target"], r["mae"], r["baseline_mae"], r["promoted"])
 
     slate = predict_slate(load_frames(), today, persist=True)
     log.info("predicted %d players across %d games for %s", len(slate["predictions"]), len(slate["games"]), today)
+    return ingest_ok
+
+
+def _ingest(today) -> bool:
+    try:
+        n_team, n_player = load_season_logs(CURRENT_SEASON, since=today - timedelta(days=RELOAD_DAYS))
+        log.info("box scores: %d team-games, %d player-games", n_team, n_player)
+        load_players(CURRENT_SEASON)
+        load_schedule(CURRENT_SEASON)
+        return True
+    except Exception:
+        log.exception("box scores: download from stats.nba.com failed; continuing with the data already stored")
+        return False
+
+
+def _missing_last_night(today) -> bool:
+    """True if yesterday had games that aren't loaded as final yet."""
+    with engine.connect() as conn:
+        n = conn.execute(select(func.count()).select_from(Game).where(Game.date == today - timedelta(days=1), Game.status != "final")).scalar()
+    return bool(n)
 
 
 if __name__ == "__main__":
@@ -78,4 +103,5 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh", action="store_true", help="injury refresh + re-predict only")
-    run(parser.parse_args().refresh)
+    if not run(parser.parse_args().refresh):
+        sys.exit(1)  # so Railway still shows the run as failed
