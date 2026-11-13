@@ -428,7 +428,7 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
             "in_model_top5": {stat: float(v.mean()) for stat, v in nights.groupby(level="stat")},
             "record": {stat: _record_simple(g) for stat, g in [("all", top_df), *top_df.groupby("stat")]},
         }
-    return {
+    return _json_safe({
         "kind": kind,
         "available": available,
         "totals": {stat: _record(g) for stat, g in [("all", decided), *decided.groupby("stat")]},
@@ -442,7 +442,21 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
         "top_performers": top,
         "top_summary": top_summary,
         "picks": _json_rows(df[df["result"] != "pending"]),
-    }
+    })
+
+
+def _json_safe(v):
+    """NaN/inf aren't valid JSON (the response would fail to serialize): turn them into null, everywhere, and numpy
+    scalars into plain Python numbers."""
+    if isinstance(v, dict):
+        return {k: _json_safe(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_json_safe(x) for x in v]
+    if isinstance(v, np.generic):
+        v = v.item()
+    if isinstance(v, float) and not np.isfinite(v):
+        return None
+    return v
 
 
 def _strategy(df: pd.DataFrame, flag: str, rank: str) -> dict:
