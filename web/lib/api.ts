@@ -105,6 +105,35 @@ export type EvalTotals = Record<Target, {
 export type GradedStat = { predicted: number; actual: number; error: number; p10: number; p90: number; baseline: number | null };
 export type GradedPlayer = { player_id: number; name: string; team: string | null } & Partial<Record<Target, GradedStat>>;
 
+export type PickResult = "win" | "loss" | "push" | "no pick";
+export type Kind = "live" | "backtest";
+export type StatKey = Target | "all";
+
+export type Record_ = { wins: number; losses: number; pushes: number; picks: number; win_pct: number | null };
+
+export type Pick = {
+  date: string; game_id: string; player_id: number; player: string | null; team: string | null; opp: string | null; stat: Target;
+  line: number; open_line: number | null; predicted: number; edge: number; pick: "over" | "under" | null; actual: number;
+  result: PickResult; model_version: string; kind: Kind;
+};
+
+export type TopPerformer = {
+  date: string; stat: Target; rank: number; player_id: number; player: string | null; team: string | null; actual: number;
+  predicted: number | null; model_rank: number | null; line: number | null; pick: "over" | "under" | null; result: PickResult | null;
+};
+
+export type Performance = {
+  kind: Kind;
+  available: Record<Kind, number>;
+  totals: Partial<Record<StatKey, Record_>>;
+  no_pick: number;
+  running: ({ date: string; stat: StatKey; day_wins: number; day_losses: number; day_pushes: number } & Omit<Record_, "picks">)[];
+  by_edge: ({ label: string; min: number } & Record_)[];
+  top_performers: TopPerformer[];
+  top_summary: { nights: number; in_model_top5: Partial<Record<Target, number>>; record: Partial<Record<StatKey, Record_>> } | null;
+  picks: Pick[];
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, { cache: "no-store", ...init });
   if (!res.ok) {
@@ -123,7 +152,10 @@ export const api = {
   metrics: () => request<ModelMetrics>("/api/model/metrics"),
   evaluation: () => request<{ days: DayEval[]; totals: Record<"live" | "backtest", Partial<EvalTotals>> }>("/api/evaluation"),
   evaluationDay: (date: string) => request<GradedPlayer[]>(`/api/evaluation/${date}`),
+  performance: (kind: Kind) => request<Performance>(`/api/performance?kind=${kind}`),
 };
+
+export const performanceExportUrl = `${API_URL}/api/performance-export.csv`;
 
 export const exportUrl = `${API_URL}/api/evaluation-export.csv`;
 export const pct = (v: number | null | undefined) => (v == null ? "–" : `${(v * 100).toFixed(0)}%`);

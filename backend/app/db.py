@@ -15,8 +15,9 @@ class Base(DeclarativeBase):
     pass
 
 
-def upsert(table, rows: Iterable[dict]) -> int:
-    """Insert rows, updating non-key columns on primary-key conflict. Works on SQLite and Postgres."""
+def upsert(table, rows: Iterable[dict], update: bool = True) -> int:
+    """Insert rows, updating non-key columns on primary-key conflict (or leaving existing rows alone with
+    update=False). Works on SQLite and Postgres."""
     rows = list(rows)
     if not rows:
         return 0
@@ -28,6 +29,6 @@ def upsert(table, rows: Iterable[dict]) -> int:
             batch = rows[i : i + chunk]
             stmt = insert(table).values(batch)
             update_cols = {c: stmt.excluded[c] for c in batch[0] if c not in keys}
-            stmt = stmt.on_conflict_do_update(index_elements=keys, set_=update_cols) if update_cols else stmt.on_conflict_do_nothing()
+            stmt = stmt.on_conflict_do_update(index_elements=keys, set_=update_cols) if update and update_cols else stmt.on_conflict_do_nothing()
             conn.execute(stmt)
     return len(rows)

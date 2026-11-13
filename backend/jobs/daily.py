@@ -15,7 +15,9 @@ from app.clock import today_et
 from app.config import CURRENT_SEASON
 from app.db import engine
 from app.features.build import load_frames
-from app.ingest.load import load_game_lines, load_injuries, load_players, load_schedule, load_season_logs
+from app.ingest.load import (
+    dates_missing_props, load_game_lines, load_injuries, load_player_props, load_players, load_schedule, load_season_logs,
+)
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
@@ -54,6 +56,14 @@ def run(refresh_only: bool = False) -> None:
     n_inj, unmatched = load_injuries(today)
     log.info("injuries: %d stored, %d unmatched %s", n_inj, len(unmatched), unmatched[:10])
     log.info("game lines: %d stored", load_game_lines([today, today + timedelta(days=1)]))
+    # Today's lines before tip-off; on the morning run also yesterday's closing lines and any season dates still missing.
+    # Props only feed the Performance page, so a failure here shouldn't stop the retrain and today's predictions.
+    try:
+        prop_dates = [today] if refresh_only else sorted({today - timedelta(days=1), today, *dates_missing_props(CURRENT_SEASON, today)})
+        n_props, unmatched_props = load_player_props(prop_dates)
+        log.info("player props: %d stored for %d dates, %d unmatched %s", n_props, len(prop_dates), len(unmatched_props), unmatched_props[:10])
+    except Exception:
+        log.exception("player props: failed, continuing without them")
 
     if not refresh_only:
         for r in train_all():

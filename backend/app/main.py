@@ -1,23 +1,33 @@
 import time
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from threading import Lock
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
+from sqlalchemy.orm import aliased
 
 from app.clock import today_et
 from app.config import CORS_ORIGINS
 from app.db import SessionLocal
 from app.features.build import Frames, load_frames
+from app.init_db import init_db
 from app.ml.backtest import VERSION_PREFIX as BACKTEST_PREFIX
 from app.ml.predict import Overrides, predict_slate
-from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, Player, PlayerGameStat, Prediction, Team
+from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, Player, PlayerGameStat, PlayerProp, Prediction, Team
 
-app = FastAPI(title="NBA Player Predictor")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()  # create any tables added since the last deploy (e.g. player_props) before serving
+    yield
+
+
+app = FastAPI(title="NBA Player Predictor", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 FRAMES_TTL_S = 600
@@ -224,3 +234,140 @@ def evaluation_export():
     df["in_range"] = (df["actual"] >= df["p10"]) & (df["actual"] <= df["p90"])
     return Response(df.to_csv(index=False), media_type="text/csv",
                     headers={"Content-Disposition": 'attachment; filename="prediction-accuracy.csv"'})
+
+
+# ---------------------------------------------------------------- performance vs. DraftKings lines
+
+EDGE_BUCKETS = [(0, 1, "Under 1"), (1, 2, "1 to 2"), (2, 3, "2 to 3"), (3, float("inf"), "3 or more")]
+PICK_COLUMNS = ["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line", "predicted", "edge", "pick",
+                "actual", "result", "model_version", "kind"]
+
+
+def _picks() -> pd.DataFrame:
+    """Every graded prediction that has a DraftKings line, with the model's over/under pick and how it turned out.
+
+    The pick is "over" when the prediction is above the line and "under" when below (no pick when exactly on it).
+    A pick wins when the actual stat lands on that side of the line; landing exactly on the line is a push.
+    """
+    team, opp = aliased(Team), aliased(Team)
+    q = (
+        select(Prediction.game_date, Prediction.game_id, Prediction.player_id, Player.name, team.abbr, opp.abbr, Prediction.target,
+               PlayerProp.line, PlayerProp.open_line, Prediction.predicted, Prediction.actual, Prediction.model_version)
+        .join(PlayerProp, and_(PlayerProp.player_id == Prediction.player_id, PlayerProp.game_id == Prediction.game_id,
+                               PlayerProp.target == Prediction.target))
+        .join(Player, Player.id == Prediction.player_id, isouter=True)
+        .join(PlayerGameStat, and_(PlayerGameStat.player_id == Prediction.player_id, PlayerGameStat.game_id == Prediction.game_id), isouter=True)
+        .join(team, team.id == PlayerGameStat.team_id, isouter=True)
+        .join(opp, opp.id == PlayerGameStat.opp_team_id, isouter=True)
+        .where(Prediction.actual.is_not(None))
+    )
+    with SessionLocal() as s:
+        df = pd.DataFrame(s.execute(q).all(), columns=["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line",
+                                                        "predicted", "actual", "model_version"])
+    if df.empty:
+        return pd.DataFrame(columns=PICK_COLUMNS)
+    df["predicted"] = df["predicted"].round(1)  # pick off the shown prediction so the table can be checked by eye
+    df["edge"] = (df["predicted"] - df["line"]).round(1)
+    df["pick"] = np.select([df["edge"] > 0, df["edge"] < 0], ["over", "under"], None)
+    over_hit, under_hit = df["actual"] > df["line"], df["actual"] < df["line"]
+    df["result"] = np.select(
+        [df["pick"].isna(), df["actual"] == df["line"], (df["pick"] == "over") & over_hit, (df["pick"] == "under") & under_hit],
+        ["no pick", "push", "win", "win"], "loss")
+    df["kind"] = np.where(df["model_version"].str.startswith(BACKTEST_PREFIX), "backtest", "live")
+    df["date"] = pd.to_datetime(df["date"]).dt.date.astype(str)
+    return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
+
+
+def _record(g: pd.DataFrame) -> dict:
+    w, l, p = (int((g["result"] == r).sum()) for r in ("win", "loss", "push"))
+    return {"wins": w, "losses": l, "pushes": p, "picks": w + l + p, "win_pct": w / (w + l) if w + l else None}
+
+
+def _top_performers(kind: str, picks: pd.DataFrame) -> list[dict]:
+    """Each night's top 5 by actual points / rebounds / assists, with what the model predicted and where it ranked them."""
+    with SessionLocal() as s:
+        preds = pd.DataFrame(s.execute(select(Prediction.game_date, Prediction.player_id, Prediction.game_id, Prediction.target,
+                                              Prediction.predicted, Prediction.model_version)).all(),
+                             columns=["date", "player_id", "game_id", "stat", "predicted", "model_version"])
+        if preds.empty:
+            return []
+        preds = preds[preds["model_version"].str.startswith(BACKTEST_PREFIX) == (kind == "backtest")]
+        dates = sorted(set(preds["date"]))
+        if not dates:
+            return []
+        box = pd.DataFrame(s.execute(
+            select(Game.date, PlayerGameStat.player_id, PlayerGameStat.game_id, Player.name, Team.abbr, PlayerGameStat.pts, PlayerGameStat.reb,
+                   PlayerGameStat.ast)
+            .join(Game, Game.id == PlayerGameStat.game_id).join(Player, Player.id == PlayerGameStat.player_id, isouter=True)
+            .join(Team, Team.id == PlayerGameStat.team_id, isouter=True).where(Game.date.in_(dates))
+        ).all(), columns=["date", "player_id", "game_id", "player", "team", "pts", "reb", "ast"])
+    picks = picks.set_index(["player_id", "game_id", "stat"])
+    preds["model_rank"] = preds.groupby(["date", "stat"])["predicted"].rank(ascending=False, method="min").astype(int)
+    preds = preds.set_index(["player_id", "game_id", "stat"])
+    out = []
+    for (d, stat), g in box.melt(id_vars=["date", "player_id", "game_id", "player", "team"], value_vars=["pts", "reb", "ast"],
+                                 var_name="stat", value_name="actual").groupby(["date", "stat"]):
+        top = g.sort_values(["actual", "player"], ascending=[False, True]).head(5)
+        for rank, r in enumerate(top.itertuples(), 1):
+            key = (r.player_id, r.game_id, stat)
+            pr = preds.loc[key] if key in preds.index else None
+            pk = picks.loc[key] if key in picks.index else None
+            out.append({
+                "date": str(d), "stat": stat, "rank": rank, "player_id": int(r.player_id), "player": r.player, "team": r.team,
+                "actual": int(r.actual), "predicted": None if pr is None else round(float(pr["predicted"]), 1),
+                "model_rank": None if pr is None else int(pr["model_rank"]),
+                "line": None if pk is None else float(pk["line"]), "pick": None if pk is None else pk["pick"],
+                "result": None if pk is None else pk["result"],
+            })
+    return out
+
+
+@app.get("/api/performance")
+def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
+    """Over/under record of the model's predictions against DraftKings player prop lines, plus each night's top 5 performers."""
+    allp = _picks()
+    available = {k: int((allp["kind"] == k).sum()) for k in ("live", "backtest")}
+    df = allp[allp["kind"] == kind]
+    graded = df[df["result"] != "no pick"]
+
+    running, cum = [], {}
+    for d, g in graded.groupby("date"):
+        for stat, gs in [("all", g), *g.groupby("stat")]:
+            day = _record(gs)
+            c = cum.setdefault(stat, {"wins": 0, "losses": 0, "pushes": 0})
+            for k in c:
+                c[k] += day[k]
+            running.append({"date": d, "stat": stat, "day_wins": day["wins"], "day_losses": day["losses"], "day_pushes": day["pushes"],
+                            "wins": c["wins"], "losses": c["losses"], "pushes": c["pushes"],
+                            "win_pct": c["wins"] / (c["wins"] + c["losses"]) if c["wins"] + c["losses"] else None})
+
+    abs_edge = graded["edge"].abs()
+    by_edge = [{"label": label, "min": lo, **_record(graded[(abs_edge >= lo) & (abs_edge < hi)])} for lo, hi, label in EDGE_BUCKETS]
+    top = _top_performers(kind, allp)
+    top_df = pd.DataFrame(top)
+    top_summary = None
+    if not top_df.empty:
+        nights = top_df.groupby(["date", "stat"])["model_rank"].apply(lambda r: int((r <= 5).sum()))
+        top_summary = {
+            "nights": int(top_df["date"].nunique()),
+            "in_model_top5": {stat: float(v.mean()) for stat, v in nights.groupby(level="stat")},  # avg of the 5 the model also had top 5
+            "record": {stat: _record(g[g["result"].isin(["win", "loss", "push"])]) for stat, g in [("all", top_df), *top_df.groupby("stat")]},
+        }
+    return {
+        "kind": kind,
+        "available": available,
+        "totals": {stat: _record(g) for stat, g in [("all", graded), *graded.groupby("stat")]},
+        "no_pick": int((df["result"] == "no pick").sum()),
+        "running": running,
+        "by_edge": by_edge,
+        "top_performers": top,
+        "top_summary": top_summary,
+        "picks": df.replace({np.nan: None}).to_dict("records"),
+    }
+
+
+@app.get("/api/performance-export.csv")
+def performance_export():
+    """Every graded over/under pick against the DraftKings line, live and backtest."""
+    return Response(_picks().to_csv(index=False), media_type="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="over-under-picks.csv"'})
