@@ -1,7 +1,7 @@
 """Daily pipeline. Run by Railway cron.
 
 python -m jobs.daily            full run: ingest -> actuals -> evaluate yesterday -> self-tune + retrain -> predict today
-python -m jobs.daily --refresh  pre-tip-off: refresh injury report and re-predict today (no retrain)
+python -m jobs.daily --refresh  evening (6pm ET) injury update: refresh injuries + lines and re-predict today (no retrain)
 """
 
 import argparse
@@ -82,7 +82,9 @@ def run(refresh_only: bool = False) -> bool:
 
     # Freeze tonight's picks (line + prediction) for games that haven't started; the top 5 is ranked on these.
     try:
-        log.info("pick snapshots: %d frozen for %d games not yet started", snapshot_pregame(pregame_games), len(pregame_games))
+        phases = ("final",) if refresh_only else ("morning", "final")
+        log.info("pick snapshots (%s): %d frozen for %d games not yet started", "/".join(phases),
+                 snapshot_pregame(pregame_games, phases), len(pregame_games))
         rebuilt = rebuild_missing(today)
         if rebuilt:
             log.info("pick snapshots: rebuilt %s from lines stored before tip-off", [d.isoformat() for d in rebuilt])

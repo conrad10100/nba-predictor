@@ -6,7 +6,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { LineChart } from "@/components/LineChart";
 import {
   api, fmt, performanceExportUrl, STAT_LABEL, TARGETS,
-  type Kind, type Performance, type Pick as PickRow, type PickResult, type Record_, type RunningRow, type StatKey, type Target, type Top5Method,
+  type Kind, type Performance, type Pick as PickRow, type PickResult, type Phase, type Record_, type RunningRow, type StatKey, type Target, type Top5Method,
 } from "@/lib/api";
 
 // At standard -110 juice you need to win 110/210 of decided picks to break even.
@@ -45,27 +45,42 @@ function WinPct({ value, className = "" }: { value: number | null; className?: s
   return <span className={`${value >= BREAK_EVEN ? "text-good" : "text-critical"} ${className}`}>{(value * 100).toFixed(1)}%</span>;
 }
 
-export function PerformanceView() {
+const PHASE: Record<Phase, { title: string; about: string; other: { href: string; label: string }; provisional: string }> = {
+  morning: {
+    title: "Performance vs. DraftKings: morning picks",
+    about: "Picks as they stood after the morning run (about 5am ET), before the evening injury update.",
+    other: { href: "/performance/after-injuries", label: "Compare with picks after the 6pm ET injury update →" },
+    provisional: "Locked at the morning run. Once a game tips off its picks can't change, and lines DraftKings posts later never count.",
+  },
+  final: {
+    title: "Performance vs. DraftKings: after the injury update",
+    about: "Picks as they stood after the 6pm ET injury update, the last update before most tip-offs (earlier games keep their morning picks).",
+    other: { href: "/performance", label: "← Compare with the morning picks" },
+    provisional: "Provisional until the 6pm ET injury update locks it. Once a game tips off its picks can't change, and lines DraftKings posts later never count.",
+  },
+};
+
+export function PerformanceView({ phase = "morning" }: { phase?: Phase }) {
   const [kind, setKind] = useState<Kind | null>(null);
   const [data, setData] = useState<Partial<Record<Kind, Performance>>>({});
   const [error, setError] = useState<string | null>(null);
 
   // Open on live picks once there are any (including tonight's pending top 5); until then the backtest is the only history.
   useEffect(() => {
-    api.performance("live")
+    api.performance("live", phase)
       .then((live) => {
         setData((d) => ({ ...d, live }));
         const hasLive = live.available.live > 0 || live.top5.gap.picks.length > 0;
         setKind(hasLive || live.available.backtest === 0 ? "live" : "backtest");
       })
       .catch((e) => setError(String(e.message ?? e)));
-  }, []);
+  }, [phase]);
 
   useEffect(() => {
     if (kind && !data[kind]) {
-      api.performance(kind).then((p) => setData((d) => ({ ...d, [kind]: p }))).catch((e) => setError(String(e.message ?? e)));
+      api.performance(kind, phase).then((p) => setData((d) => ({ ...d, [kind]: p }))).catch((e) => setError(String(e.message ?? e)));
     }
-  }, [kind, data]);
+  }, [kind, data, phase]);
 
   const perf = kind ? data[kind] : undefined;
   if (error) return <p className="text-critical">{error}</p>;
@@ -76,8 +91,12 @@ export function PerformanceView() {
     <div className="space-y-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold tracking-tight">Performance vs. DraftKings</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{PHASE[phase].title}</h1>
           <p className="text-sm text-text-2">
+            {PHASE[phase].about}{" "}
+            <Link href={PHASE[phase].other.href} className="text-accent underline">{PHASE[phase].other.label}</Link>
+          </p>
+          <p className="mt-1 text-sm text-text-2">
             Every player prop line on DraftKings becomes a pick: <strong>over</strong> when the model predicts more than the line,
             <strong> under</strong> when it predicts less. Each pick risks 1 unit at DraftKings&apos; price for that side; a push returns
             the stake and a player who doesn&apos;t play is void, as the book would settle it.
@@ -114,7 +133,7 @@ export function PerformanceView() {
         </p>
       ) : (
         <>
-          <ConfidentSection perf={perf} />
+          <ConfidentSection perf={perf} provisional={PHASE[phase].provisional} />
           {perf.picks.length > 0 && (
             <>
               <section className="space-y-3">
@@ -201,7 +220,7 @@ const METHOD: Record<Top5Method, { label: string; title: string; about: string }
   },
 };
 
-function ConfidentSection({ perf }: { perf: Performance }) {
+function ConfidentSection({ perf, provisional }: { perf: Performance; provisional: string }) {
   const [method, setMethod] = useState<Top5Method>("gap");
   const c = perf.top5[method];
   const t = c.totals;
@@ -312,8 +331,7 @@ function ConfidentSection({ perf }: { perf: Performance }) {
           </div>
           {rows.some((p) => p.result === "pending") && (
             <p className="border-t border-border px-4 py-2 text-xs text-text-2">
-              Provisional: picks are frozen at each pre-game update and lock at the 5pm ET update. Once a game tips off its
-              picks can&apos;t change, and lines DraftKings posts later never enter the top 5.
+              {provisional}
             </p>
           )}
           {rows.some((p) => p.odds_assumed) && <p className="border-t border-border px-4 py-2 text-xs text-text-2">* price not posted; graded at -110.</p>}

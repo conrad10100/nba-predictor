@@ -264,9 +264,9 @@ RAW_COLUMNS = ["date", "game_id", "player_id", "player", "team_id", "team", "hom
                "open_line", "over_odds", "under_odds", "predicted", "p10", "p90", "actual", "model_version"]
 
 
-def _load(source) -> pd.DataFrame:
+def _load(source, phase: str | None = None) -> pd.DataFrame:
     """Prediction + line rows. `source` is PlayerProp (the current/closing lines with the stored predictions) or
-    PickSnapshot (both frozen before tip-off)."""
+    PickSnapshot (both frozen before tip-off, for one `phase`)."""
     team, home, away = aliased(Team), aliased(Team), aliased(Team)
     keys = and_(source.player_id == Prediction.player_id, source.game_id == Prediction.game_id, source.target == Prediction.target)
     vals = Prediction if source is PlayerProp else source  # snapshots carry their own frozen prediction
@@ -281,6 +281,8 @@ def _load(source) -> pd.DataFrame:
         .join(Player, Player.id == Prediction.player_id, isouter=True)
         .join(team, team.id == Player.team_id, isouter=True)
     )
+    if phase is not None:
+        q = q.where(source.phase == phase)
     with SessionLocal() as s:
         return pd.DataFrame(s.execute(q).all(), columns=RAW_COLUMNS)
 
@@ -342,10 +344,9 @@ def _rank(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _picks() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(every pick, the nightly top-5 candidates).
+def _picks() -> pd.DataFrame:
+    """Every prediction that has a DraftKings line, graded against the stored (latest / closing) line.
 
-    Every pick: each prediction that has a DraftKings line, graded against the stored (closing) line.
     - Pick: "over" when the prediction is above the line, "under" when below (no pick when exactly on it).
     - Result: win when the player finishes on the picked side, push on the line, void if he didn't play (the book
       refunds it), pending until the game is final.
@@ -353,26 +354,34 @@ def _picks() -> tuple[pd.DataFrame, pd.DataFrame]:
       the spread of its calibrated 80% range (p10..p90), with a continuity correction because stats are whole numbers.
     - Units: 1 unit risked per pick at the DraftKings price for that side. EV: the model's expected units per pick,
       prob x payout - P(loss). Market prob: the book's no-vig chance for the same side.
-
-    Top-5 candidates: for live nights, only the picks frozen before tip-off (pick_snapshots), so the nightly top 5
-    can't change once games start; lines first seen after the games never enter it. Backtest nights are historical
-    and ranked on the stored lines.
     """
-    allp = _grade(_load(PlayerProp))
-    if allp.empty:
-        empty = pd.DataFrame(columns=PICK_COLUMNS)
-        return empty, empty
-    snap = _load(PickSnapshot)
-    snap = _grade(snap) if not snap.empty else allp.iloc[0:0]
-    snap = snap[snap["kind"] == "live"]
-    candidates = _rank(pd.concat([allp[allp["kind"] == "backtest"], snap], ignore_index=True))
-    flags = candidates[["player_id", "game_id", "stat", "kind", "confidence_rank", "top5", "gap_rank", "top5_gap"]]
-    allp = allp.merge(flags, on=["player_id", "game_id", "stat", "kind"], how="left")
+    df = _grade(_load(PlayerProp))
     for col in ("top5", "top5_gap"):
-        allp[col] = allp[col].fillna(False).astype(bool)
-    order = ["date", "player", "stat"]
-    return (allp[PICK_COLUMNS].sort_values(order).reset_index(drop=True),
-            candidates[PICK_COLUMNS].sort_values(order).reset_index(drop=True))
+        df[col] = False
+    df["confidence_rank"] = df["gap_rank"] = np.nan
+    return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True) if not df.empty else pd.DataFrame(columns=PICK_COLUMNS)
+
+
+PHASES = ("morning", "final")
+
+
+def _view(allp: pd.DataFrame, kind: str, phase: str) -> pd.DataFrame:
+    """The picks a Performance page grades, with each night's top 5 ranked.
+
+    Live nights: only picks frozen before tip-off (pick_snapshots) for the page's phase: "morning" (the morning run,
+    before the evening injury update) or "final" (after the evening injury update). Nothing about them changes once
+    games start, and lines first seen after the games never count. Backtest nights are historical and graded on the
+    stored lines (the same on both pages).
+    """
+    if kind == "backtest":
+        df = allp[allp["kind"] == "backtest"]
+    else:
+        snap = _load(PickSnapshot, phase)
+        df = _grade(snap) if not snap.empty else allp.iloc[0:0]
+        df = df[df["kind"] == "live"]
+    if df.empty:
+        return pd.DataFrame(columns=PICK_COLUMNS)
+    return _rank(df)[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
 
 
 def _record(g: pd.DataFrame) -> dict:
@@ -453,13 +462,13 @@ def _json_rows(df: pd.DataFrame) -> list[dict]:
 
 
 @app.get("/api/performance")
-def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
+def performance(kind: str = Query("live", pattern="^(live|backtest)$"), phase: str = Query("morning", pattern="^(morning|final)$")):
     """Over/under record, units and EV of the model's picks against DraftKings player props: all picks, each night's
     top 5 player-points picks (by biggest gap from the line and by confidence), and each night's top 5 performers."""
-    allp, candidates = _picks()
-    available = {k: int(((allp["kind"] == k) & allp["result"].isin(DECIDED)).sum()) for k in ("live", "backtest")}
-    df = allp[allp["kind"] == kind]
-    cand = candidates[candidates["kind"] == kind]
+    allp = _picks()
+    views = {k: _view(allp, k, phase) for k in ("live", "backtest")}
+    available = {k: int(v["result"].isin(DECIDED).sum()) for k, v in views.items()}
+    df = views[kind]
     decided = df[df["result"].isin(DECIDED)]
 
     abs_edge = decided["edge"].abs()
@@ -468,7 +477,7 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
     by_confidence = [{"label": label, **_record(decided[(prob >= lo) & (prob < hi)])}
                      for lo, hi, label in [(0, 0.55, "Under 55%"), (0.55, 0.6, "55–60%"), (0.6, 0.65, "60–65%"), (0.65, 0.7, "65–70%"),
                                            (0.7, 1.01, "70%+")]]
-    top = _top_performers(kind, allp)
+    top = _top_performers(kind, df)
     top_df = pd.DataFrame(top)
     top_summary = None
     if not top_df.empty:
@@ -487,7 +496,8 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
         "running": _running(decided, by_stat=True),
         "by_edge": by_edge,
         "by_confidence": by_confidence,
-        "top5": {name: _strategy(cand, flag, rank) for name, flag, rank in
+        "phase": phase,
+        "top5": {name: _strategy(df, flag, rank) for name, flag, rank in
                  (("gap", "top5_gap", "gap_rank"), ("confidence", "top5", "confidence_rank"))},
         "top_performers": top,
         "top_summary": top_summary,
@@ -526,7 +536,7 @@ def _record_simple(g: pd.DataFrame) -> dict:
 def evaluation_vs_line():
     """Accuracy on the players DraftKings posts a line for: the model's average miss next to the line's own average
     miss, per stat, overall and by date (live and backtest separately)."""
-    df, _ = _picks()
+    df = _picks()
     df = df[~df["result"].isin(["pending", "void"]) & df["actual"].notna()].copy()
     df["model_err"] = (df["predicted"] - df["actual"]).abs()
     df["line_err"] = (df["line"] - df["actual"]).abs()
@@ -547,7 +557,7 @@ def top_picks(on: date | None = Query(None, alias="date"), n: int = Query(TOP_N,
     """Each stat's top picks for one date: the props where the stored pre-game prediction is furthest from the
     DraftKings line (confidence breaks ties), the same way the Performance page ranks its top 5."""
     on = on or today_et()
-    df, _ = _picks()
+    df = _picks()
     df = df[(df["date"] == on.isoformat()) & df["pick"].notna() & (df["result"] != "void")]
     out = {}
     for stat in STAT_TARGETS:
@@ -560,5 +570,5 @@ def top_picks(on: date | None = Query(None, alias="date"), n: int = Query(TOP_N,
 @app.get("/api/performance-export.csv")
 def performance_export():
     """Every over/under pick against the DraftKings line (live and backtest), with confidence, price, EV and units."""
-    return Response(_picks()[0].to_csv(index=False), media_type="text/csv",
+    return Response(_picks().to_csv(index=False), media_type="text/csv",
                     headers={"Content-Disposition": 'attachment; filename="over-under-picks.csv"'})

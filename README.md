@@ -34,10 +34,14 @@ Tests: `cd backend && .venv/bin/python -m pytest`. They check that no feature ca
 
 Each run also stores DraftKings points/rebounds/assists player prop lines from ESPN (`player_props`): today's lines
 before tip-off, yesterday's closing lines, and any finished dates this season that have none yet (a one-time backfill).
-The **Performance** page grades each prediction as an over/under pick against that line: over when the prediction is
+Each pre-game run also freezes every pick (line, prices, prediction) for games that haven't started
+(`pick_snapshots`): the morning run as the "morning" picks, the evening injury update as the final picks. The
+**Performance** page grades the morning picks and **After injuries** the final ones, so a pick can never change once
+its game starts. Each grades the prediction as an over/under pick against that line: over when the prediction is
 above the line, under when below; it wins when the player finishes on that side, and landing exactly on it is a push.
 
-`python -m jobs.daily --refresh` re-pulls the injury report and re-predicts (no retrain). Run it before tip-off.
+`python -m jobs.daily --refresh` is the evening injury update: re-pulls the injury report and DraftKings lines and
+re-predicts (no retrain), shortly before most tip-offs.
 
 ## Features
 
@@ -67,7 +71,7 @@ Production runs entirely in the cloud; nothing depends on a laptop being on.
 |---|---|---|---|
 | api | `/backend` | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` | always on, healthcheck `/api/health` |
 | daily | `/backend` | `python -m jobs.daily` | `0 10 * * *` (10:00 UTC, about 5–6am ET) |
-| refresh | `/backend` | `python -m jobs.daily --refresh` | `0 22 * * *` (22:00 UTC, about 5–6pm ET) |
+| refresh | `/backend` | `python -m jobs.daily --refresh` | `0 23 * * *` (23:00 UTC: 6pm ET in winter, 7pm during daylight saving) |
 | web | `/web` | `npm run start` | always on |
 
 Variables: backend services get `DATABASE_URL` and `CURRENT_SEASON`; api also gets `CORS_ORIGINS` (the web URL);

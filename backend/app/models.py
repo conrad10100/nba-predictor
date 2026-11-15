@@ -164,15 +164,19 @@ class PlayerProp(Base):
 
 
 class PickSnapshot(Base):
-    """A pick frozen before tip-off: the DraftKings line and prices and the model's prediction as they stood at the
-    last pre-game run that saw the game. Written only for games that haven't started, so the nightly top 5 is ranked
-    and graded on what was actually known in time; lines first seen after a game (closing lines filled in the next
-    morning) never enter it."""
+    """A pick frozen before tip-off: the DraftKings line and prices and the model's prediction as they stood at a
+    pre-game run. Written only for games that haven't started, so picks are graded on what was actually known in time;
+    lines first seen after a game (closing lines filled in the next morning) never enter it.
+
+    phase "morning": as of the morning run, before the evening injury update.
+    phase "final": as of the last pre-game run (the evening injury update, or the morning run if it didn't reach the game).
+    """
 
     __tablename__ = "pick_snapshots"
     player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
     target: Mapped[str] = mapped_column(String(4), primary_key=True)
+    phase: Mapped[str] = mapped_column(String(8), primary_key=True)  # morning | final
     game_date: Mapped[date] = mapped_column(Date, index=True)
     line: Mapped[float] = mapped_column(Float)
     open_line: Mapped[float | None] = mapped_column(Float, nullable=True)
