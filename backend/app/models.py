@@ -186,7 +186,7 @@ class PickSnapshot(Base):
     p10: Mapped[float] = mapped_column(Float)
     p90: Mapped[float] = mapped_column(Float)
     model_version: Mapped[str] = mapped_column(String(32))
-    source: Mapped[str] = mapped_column(String(16), default="pregame")  # pregame | rebuilt (from lines written before tip-off)
+    source: Mapped[str] = mapped_column(String(16), default="pregame")
     taken_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 

@@ -1,7 +1,5 @@
 """Freeze each pick before tip-off so the nightly top 5 can't change after the fact."""
 
-from datetime import date, datetime, time, timedelta
-
 from sqlalchemy import and_, select
 
 from app.db import SessionLocal, upsert
@@ -9,11 +7,6 @@ from app.models import PickSnapshot, PlayerProp, Prediction
 
 SNAPSHOT_COLUMNS = ("line", "open_line", "over_odds", "under_odds")
 PHASES = ("morning", "final")
-# Rebuilding a night from stored lines: lines are only overwritten while a game hasn't started, and closing lines for
-# players without one are filled in by the next morning's run (10:00 UTC). So a line last written before this time
-# (UTC) the day after the games came from a pre-game run.
-REBUILD_CUTOFF_UTC = time(6, 0)
-FIRST_REBUILD_DATE = date(2026, 11, 13)  # first live night whose lines were stored before tip-off
 
 
 def _rows(where) -> list[dict]:
@@ -36,22 +29,3 @@ def snapshot_pregame(game_ids: set[str], phases: tuple[str, ...]) -> int:
         return 0
     rows = _rows(Prediction.game_id.in_(game_ids))
     return upsert(PickSnapshot.__table__, [{**r, "phase": ph, "source": "pregame"} for ph in phases for r in rows])
-
-
-def rebuild_missing(today: date) -> list[date]:
-    """For live nights before snapshots existed, rebuild the "final" phase from lines written before that night's
-    games. (The morning phase can't be rebuilt: the evening update overwrote the morning predictions.) Only fills
-    nights that have no snapshots at all."""
-    with SessionLocal() as s:
-        done = set(s.scalars(select(PickSnapshot.game_date).distinct()))
-        dates = [d for d in s.scalars(select(Prediction.game_date).distinct().where(
-            Prediction.game_date >= FIRST_REBUILD_DATE, Prediction.game_date < today, ~Prediction.model_version.like("backtest-%")))
-            if d not in done]
-    rebuilt = []
-    for d in sorted(dates):
-        cutoff = datetime.combine(d + timedelta(days=1), REBUILD_CUTOFF_UTC)
-        rows = [{**r, "phase": "final", "source": "rebuilt"} for r in _rows(and_(Prediction.game_date == d, PlayerProp.updated_at <= cutoff))]
-        if rows:
-            upsert(PickSnapshot.__table__, rows)
-            rebuilt.append(d)
-    return rebuilt

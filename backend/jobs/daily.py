@@ -22,7 +22,7 @@ from app.ingest.load import (
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
-from app.ml.snapshots import rebuild_missing, snapshot_pregame
+from app.ml.snapshots import snapshot_pregame
 from app.ml.train import train_all
 from app.models import Game
 
@@ -85,9 +85,6 @@ def run(refresh_only: bool = False) -> bool:
         phases = ("final",) if refresh_only else ("morning", "final")
         log.info("pick snapshots (%s): %d frozen for %d games not yet started", "/".join(phases),
                  snapshot_pregame(pregame_games, phases), len(pregame_games))
-        rebuilt = rebuild_missing(today)
-        if rebuilt:
-            log.info("pick snapshots: rebuilt %s from lines stored before tip-off", [d.isoformat() for d in rebuilt])
     except Exception:
         log.exception("pick snapshots: failed")
     return ingest_ok
