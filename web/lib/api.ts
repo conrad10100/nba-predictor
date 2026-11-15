@@ -144,10 +144,12 @@ export type RunningRow = {
 };
 
 export type Top5Method = "gap" | "confidence";
+export type Phase = "morning" | "final";
 export type Top5Strategy = { totals: Record_; running: RunningRow[]; picks: Pick[] };
 
 export type Performance = {
   kind: Kind;
+  phase: Phase;
   available: Record<Kind, number>;
   totals: Partial<Record<StatKey, Record_>>;
   no_pick: number;
@@ -179,7 +181,7 @@ export const api = {
   metrics: () => request<ModelMetrics>("/api/model/metrics"),
   evaluation: () => request<{ days: DayEval[]; totals: Record<"live" | "backtest", Partial<EvalTotals>> }>("/api/evaluation"),
   evaluationDay: (date: string) => request<GradedPlayer[]>(`/api/evaluation/${date}`),
-  performance: (kind: Kind) => request<Performance>(`/api/performance?kind=${kind}`),
+  performance: (kind: Kind, phase: Phase) => request<Performance>(`/api/performance?kind=${kind}&phase=${phase}`),
   accuracyVsLine: () => request<VsLineReport>("/api/accuracy-vs-line"),
   picks: (date: string) => request<{ date: string; picks: Record<Target, Pick[]> }>(`/api/picks?date=${date}`),
 };

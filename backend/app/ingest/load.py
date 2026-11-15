@@ -191,12 +191,12 @@ def load_game_lines(dates: list[date]) -> int:
     return upsert(GameLine.__table__, rows)
 
 
-def load_player_props(dates: list[date]) -> tuple[int, list[str]]:
+def load_player_props(dates: list[date]) -> tuple[int, list[str], set[str]]:
     """Store DraftKings points/rebounds/assists lines for the listed dates' games.
 
     Games that haven't started overwrite any earlier snapshot (latest pre-game line wins). Finished games only fill
     in lines we never captured, so a pre-game snapshot is never replaced. Games in progress are skipped.
-    Returns (rows written, ESPN names that couldn't be matched to a player).
+    Returns (rows written, ESPN names that couldn't be matched to a player, ids of games that hadn't started).
     """
     with SessionLocal() as s:
         abbr_to_id = {t.abbr: t.id for t in s.scalars(select(Team))}
@@ -205,12 +205,14 @@ def load_player_props(dates: list[date]) -> tuple[int, list[str]]:
         known = dict(s.execute(select(PlayerProp.espn_athlete_id, PlayerProp.player_id).distinct()).all())
     by_matchup = {(g.date, g.home_team_id, g.away_team_id): g.id for g in games}
     rosters: dict[str, dict[int, str]] = {}
-    pre, post, unmatched = [], [], set()
+    pre, post, unmatched, pre_games = [], [], set(), set()
     for d in dates:
         for prop in nba_client.espn_player_props(d):
             game_id = by_matchup.get((d, abbr_to_id.get(prop["home"]), abbr_to_id.get(prop["away"])))
             if game_id is None or prop["state"] == "in":
                 continue
+            if prop["state"] == "pre":
+                pre_games.add(game_id)
             aid = prop["espn_athlete_id"]
             if aid not in known:
                 name = _espn_name(aid, prop["espn_team_ids"], rosters)
@@ -223,7 +225,7 @@ def load_player_props(dates: list[date]) -> tuple[int, list[str]]:
                    "open_line": prop["open_line"], "over_odds": prop["over_odds"], "under_odds": prop["under_odds"], "espn_athlete_id": aid, "provider": "DraftKings", "source_updated": prop["updated"]}
             (pre if prop["state"] == "pre" else post).append(row)
     n = upsert(PlayerProp.__table__, pre) + upsert(PlayerProp.__table__, post, update=False)
-    return n, sorted(unmatched)
+    return n, sorted(unmatched), pre_games
 
 
 def _espn_name(athlete_id: int, team_ids: list[str], rosters: dict[str, dict[int, str]]) -> str | None:

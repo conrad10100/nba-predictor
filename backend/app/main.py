@@ -21,7 +21,7 @@ from app.features.build import Frames, load_frames
 from app.init_db import init_db
 from app.ml.backtest import VERSION_PREFIX as BACKTEST_PREFIX
 from app.ml.predict import Overrides, predict_slate
-from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, Player, PlayerGameStat, PlayerProp, Prediction, Team
+from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, PickSnapshot, Player, PlayerGameStat, PlayerProp, Prediction, Team
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -260,39 +260,36 @@ def _implied(odds: pd.Series) -> pd.Series:
     return pd.Series(np.where(odds > 0, 100 / (odds + 100), -odds / (-odds + 100)), index=odds.index)
 
 
-def _picks() -> pd.DataFrame:
-    """Every prediction that has a DraftKings line, with the model's over/under pick, how confident it is and how it did.
+RAW_COLUMNS = ["date", "game_id", "player_id", "player", "team_id", "team", "home", "away", "home_team_id", "status", "stat", "line",
+               "open_line", "over_odds", "under_odds", "predicted", "p10", "p90", "actual", "model_version"]
 
-    - Pick: "over" when the prediction is above the line, "under" when below (no pick when exactly on it).
-    - Result: win when the player finishes on the picked side, push on the line, void if he didn't play (the book
-      refunds it), pending until the game is final.
-    - Confidence (prob): the model's chance the pick wins, treating the outcome as normal around the prediction with
-      the spread of its calibrated 80% range (p10..p90), with a continuity correction because stats are whole numbers.
-    - Units: 1 unit risked per pick at the DraftKings price for that side. EV: the model's expected units per pick,
-      prob x payout - P(loss). Market prob: the book's no-vig chance for the same side.
-    - Top 5, two ways, each night among player-points picks and from everything known before tip-off: the five with the
-      highest confidence (top5 / confidence_rank), and the five where the prediction is furthest from the line
-      (top5_gap / gap_rank; ties broken by confidence).
-    """
+
+def _load(source, phase: str | None = None) -> pd.DataFrame:
+    """Prediction + line rows. `source` is PlayerProp (the current/closing lines with the stored predictions) or
+    PickSnapshot (both frozen before tip-off, for one `phase`)."""
     team, home, away = aliased(Team), aliased(Team), aliased(Team)
+    keys = and_(source.player_id == Prediction.player_id, source.game_id == Prediction.game_id, source.target == Prediction.target)
+    vals = Prediction if source is PlayerProp else source  # snapshots carry their own frozen prediction
     q = (
         select(Prediction.game_date, Prediction.game_id, Prediction.player_id, Player.name, Player.team_id, team.abbr, home.abbr, away.abbr,
-               Game.home_team_id, Game.status, Prediction.target, PlayerProp.line, PlayerProp.open_line, PlayerProp.over_odds,
-               PlayerProp.under_odds, Prediction.predicted, Prediction.p10, Prediction.p90, Prediction.actual, Prediction.model_version)
-        .join(PlayerProp, and_(PlayerProp.player_id == Prediction.player_id, PlayerProp.game_id == Prediction.game_id,
-                               PlayerProp.target == Prediction.target))
+               Game.home_team_id, Game.status, Prediction.target, source.line, source.open_line, source.over_odds,
+               source.under_odds, vals.predicted, vals.p10, vals.p90, Prediction.actual, vals.model_version)
+        .join(source, keys)
         .join(Game, Game.id == Prediction.game_id)
         .join(home, home.id == Game.home_team_id, isouter=True)
         .join(away, away.id == Game.away_team_id, isouter=True)
         .join(Player, Player.id == Prediction.player_id, isouter=True)
         .join(team, team.id == Player.team_id, isouter=True)
     )
+    if phase is not None:
+        q = q.where(source.phase == phase)
     with SessionLocal() as s:
-        df = pd.DataFrame(s.execute(q).all(), columns=[
-            "date", "game_id", "player_id", "player", "team_id", "team", "home", "away", "home_team_id", "status", "stat", "line",
-            "open_line", "over_odds", "under_odds", "predicted", "p10", "p90", "actual", "model_version"])
-    if df.empty:
-        return pd.DataFrame(columns=PICK_COLUMNS)
+        return pd.DataFrame(s.execute(q).all(), columns=RAW_COLUMNS)
+
+
+def _grade(df: pd.DataFrame) -> pd.DataFrame:
+    """Pick, confidence, price, EV, result, units and CLV for each row (see _picks)."""
+    df = df.copy()
     df["opp"] = np.where(df["team_id"] == df["home_team_id"], df["away"], df["home"])
     df["predicted"] = df["predicted"].round(1)  # pick off the shown prediction so the table can be checked by eye
     df["edge"] = (df["predicted"] - df["line"]).round(1)
@@ -330,15 +327,61 @@ def _picks() -> pd.DataFrame:
 
     df["kind"] = np.where(df["model_version"].str.startswith(BACKTEST_PREFIX), "backtest", "live")
     df["date"] = pd.to_datetime(df["date"]).dt.date.astype(str)
+    for c in ("prob", "ev", "market_prob", "units", "clv"):
+        df[c] = df[c].round(4)
+    return df
+
+
+def _rank(df: pd.DataFrame) -> pd.DataFrame:
+    """Each night's top 5 player-points picks, by confidence and by biggest gap from the line (confidence breaks ties)."""
+    df = df.copy()
     points = df["pick"].notna() & (df["stat"] == TOP_STAT)
     df["confidence_rank"] = df[points].groupby(["kind", "date"])["prob"].rank(ascending=False, method="first")
     df["top5"] = df["confidence_rank"] <= TOP_N
-    gap_key = df["edge"].abs() + df["prob"].fillna(0) / 1000  # bigger gap first; confidence breaks ties
+    gap_key = df["edge"].abs() + df["prob"].fillna(0) / 1000
     df["gap_rank"] = gap_key[points].groupby([df["kind"], df["date"]]).rank(ascending=False, method="first")
     df["top5_gap"] = df["gap_rank"] <= TOP_N
-    for c in ("prob", "ev", "market_prob", "units", "clv"):
-        df[c] = df[c].round(4)
-    return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
+    return df
+
+
+def _picks() -> pd.DataFrame:
+    """Every prediction that has a DraftKings line, graded against the stored (latest / closing) line.
+
+    - Pick: "over" when the prediction is above the line, "under" when below (no pick when exactly on it).
+    - Result: win when the player finishes on the picked side, push on the line, void if he didn't play (the book
+      refunds it), pending until the game is final.
+    - Confidence (prob): the model's chance the pick wins, treating the outcome as normal around the prediction with
+      the spread of its calibrated 80% range (p10..p90), with a continuity correction because stats are whole numbers.
+    - Units: 1 unit risked per pick at the DraftKings price for that side. EV: the model's expected units per pick,
+      prob x payout - P(loss). Market prob: the book's no-vig chance for the same side.
+    """
+    df = _grade(_load(PlayerProp))
+    for col in ("top5", "top5_gap"):
+        df[col] = False
+    df["confidence_rank"] = df["gap_rank"] = np.nan
+    return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True) if not df.empty else pd.DataFrame(columns=PICK_COLUMNS)
+
+
+PHASES = ("morning", "final")
+
+
+def _view(allp: pd.DataFrame, kind: str, phase: str) -> pd.DataFrame:
+    """The picks a Performance page grades, with each night's top 5 ranked.
+
+    Live nights: only picks frozen before tip-off (pick_snapshots) for the page's phase: "morning" (the morning run,
+    before the evening injury update) or "final" (after the evening injury update). Nothing about them changes once
+    games start, and lines first seen after the games never count. Backtest nights are historical and graded on the
+    stored lines (the same on both pages).
+    """
+    if kind == "backtest":
+        df = allp[allp["kind"] == "backtest"]
+    else:
+        snap = _load(PickSnapshot, phase)
+        df = _grade(snap) if not snap.empty else allp.iloc[0:0]
+        df = df[df["kind"] == "live"]
+    if df.empty:
+        return pd.DataFrame(columns=PICK_COLUMNS)
+    return _rank(df)[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
 
 
 def _record(g: pd.DataFrame) -> dict:
@@ -419,12 +462,13 @@ def _json_rows(df: pd.DataFrame) -> list[dict]:
 
 
 @app.get("/api/performance")
-def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
+def performance(kind: str = Query("live", pattern="^(live|backtest)$"), phase: str = Query("morning", pattern="^(morning|final)$")):
     """Over/under record, units and EV of the model's picks against DraftKings player props: all picks, each night's
     top 5 player-points picks (by biggest gap from the line and by confidence), and each night's top 5 performers."""
     allp = _picks()
-    available = {k: int(((allp["kind"] == k) & allp["result"].isin(DECIDED)).sum()) for k in ("live", "backtest")}
-    df = allp[allp["kind"] == kind]
+    views = {k: _view(allp, k, phase) for k in ("live", "backtest")}
+    available = {k: int(v["result"].isin(DECIDED).sum()) for k, v in views.items()}
+    df = views[kind]
     decided = df[df["result"].isin(DECIDED)]
 
     abs_edge = decided["edge"].abs()
@@ -433,7 +477,7 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
     by_confidence = [{"label": label, **_record(decided[(prob >= lo) & (prob < hi)])}
                      for lo, hi, label in [(0, 0.55, "Under 55%"), (0.55, 0.6, "55–60%"), (0.6, 0.65, "60–65%"), (0.65, 0.7, "65–70%"),
                                            (0.7, 1.01, "70%+")]]
-    top = _top_performers(kind, allp)
+    top = _top_performers(kind, df)
     top_df = pd.DataFrame(top)
     top_summary = None
     if not top_df.empty:
@@ -452,6 +496,7 @@ def performance(kind: str = Query("live", pattern="^(live|backtest)$")):
         "running": _running(decided, by_stat=True),
         "by_edge": by_edge,
         "by_confidence": by_confidence,
+        "phase": phase,
         "top5": {name: _strategy(df, flag, rank) for name, flag, rank in
                  (("gap", "top5_gap", "gap_rank"), ("confidence", "top5", "confidence_rank"))},
         "top_performers": top,

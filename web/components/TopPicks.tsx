@@ -34,7 +34,7 @@ export function TopPicks({ date }: { date: string }) {
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-4 py-2.5">
         <h2 className="text-sm font-medium">Top picks vs. DraftKings</h2>
         <p className="text-xs text-text-2">
-          Biggest difference between the model&apos;s prediction and the DraftKings line · <Link href="/performance" className="underline">track record</Link>
+          Biggest difference between the model&apos;s prediction and the DraftKings line · updates until the 6pm ET injury update · <Link href="/performance" className="underline">track record</Link>
         </p>
       </div>
       <div className="grid divide-y divide-border md:grid-cols-3 md:divide-x md:divide-y-0">

@@ -1,7 +1,7 @@
 """Daily pipeline. Run by Railway cron.
 
 python -m jobs.daily            full run: ingest -> actuals -> evaluate yesterday -> self-tune + retrain -> predict today
-python -m jobs.daily --refresh  pre-tip-off: refresh injury report and re-predict today (no retrain)
+python -m jobs.daily --refresh  evening (6pm ET) injury update: refresh injuries + lines and re-predict today (no retrain)
 """
 
 import argparse
@@ -22,6 +22,7 @@ from app.ingest.load import (
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
+from app.ml.snapshots import snapshot_pregame
 from app.ml.train import train_all
 from app.models import Game
 
@@ -64,9 +65,10 @@ def run(refresh_only: bool = False) -> bool:
     log.info("game lines: %d stored", load_game_lines([today, today + timedelta(days=1)]))
     # Today's lines before tip-off; on the morning run also yesterday's closing lines and any season dates still missing.
     # Props only feed the Performance page, so a failure here shouldn't stop the retrain and today's predictions.
+    pregame_games: set[str] = set()
     try:
         prop_dates = [today] if refresh_only else sorted({today - timedelta(days=1), today, *dates_missing_props(CURRENT_SEASON, today)})
-        n_props, unmatched_props = load_player_props(prop_dates)
+        n_props, unmatched_props, pregame_games = load_player_props(prop_dates)
         log.info("player props: %d stored for %d dates, %d unmatched %s", n_props, len(prop_dates), len(unmatched_props), unmatched_props[:10])
     except Exception:
         log.exception("player props: failed, continuing without them")
@@ -77,6 +79,14 @@ def run(refresh_only: bool = False) -> bool:
 
     slate = predict_slate(load_frames(), today, persist=True)
     log.info("predicted %d players across %d games for %s", len(slate["predictions"]), len(slate["games"]), today)
+
+    # Freeze tonight's picks (line + prediction) for games that haven't started; the top 5 is ranked on these.
+    try:
+        phases = ("final",) if refresh_only else ("morning", "final")
+        log.info("pick snapshots (%s): %d frozen for %d games not yet started", "/".join(phases),
+                 snapshot_pregame(pregame_games, phases), len(pregame_games))
+    except Exception:
+        log.exception("pick snapshots: failed")
     return ingest_ok
 
 
