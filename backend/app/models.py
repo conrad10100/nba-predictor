@@ -163,6 +163,29 @@ class PlayerProp(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class PickSnapshot(Base):
+    """A pick frozen before tip-off: the DraftKings line and prices and the model's prediction as they stood at the
+    last pre-game run that saw the game. Written only for games that haven't started, so the nightly top 5 is ranked
+    and graded on what was actually known in time; lines first seen after a game (closing lines filled in the next
+    morning) never enter it."""
+
+    __tablename__ = "pick_snapshots"
+    player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    target: Mapped[str] = mapped_column(String(4), primary_key=True)
+    game_date: Mapped[date] = mapped_column(Date, index=True)
+    line: Mapped[float] = mapped_column(Float)
+    open_line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    over_odds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    under_odds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    predicted: Mapped[float] = mapped_column(Float)
+    p10: Mapped[float] = mapped_column(Float)
+    p90: Mapped[float] = mapped_column(Float)
+    model_version: Mapped[str] = mapped_column(String(32))
+    source: Mapped[str] = mapped_column(String(16), default="pregame")  # pregame | rebuilt (from lines written before tip-off)
+    taken_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class DailyEvaluation(Base):
     """How the pre-game predictions for one date did once the games were played."""
 

@@ -310,6 +310,12 @@ function ConfidentSection({ perf }: { perf: Performance }) {
               </tbody>
             </table>
           </div>
+          {rows.some((p) => p.result === "pending") && (
+            <p className="border-t border-border px-4 py-2 text-xs text-text-2">
+              Provisional: picks are frozen at each pre-game update and lock at the 5pm ET update. Once a game tips off its
+              picks can&apos;t change, and lines DraftKings posts later never enter the top 5.
+            </p>
+          )}
           {rows.some((p) => p.odds_assumed) && <p className="border-t border-border px-4 py-2 text-xs text-text-2">* price not posted; graded at -110.</p>}
         </div>
       )}
