@@ -1,3 +1,7 @@
+import gzip
+import json
+import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
@@ -6,8 +10,9 @@ from threading import Lock
 import numpy as np
 import pandas as pd
 from scipy.special import ndtr
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
@@ -26,11 +31,15 @@ from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, PickSnapsho
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()  # create any tables added since the last deploy (e.g. player_props) before serving
+    threading.Thread(target=_warm_performance, daemon=True).start()  # first visitor after a deploy shouldn't pay for it
     yield
 
 
 app = FastAPI(title="NBA Player Predictor", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(GZipMiddleware, minimum_size=1000)  # the Performance payload is mostly repetitive pick rows
+
+log = logging.getLogger("api")
 
 FRAMES_TTL_S = 600
 _frames: tuple[float, Frames] | None = None
@@ -344,7 +353,52 @@ def _rank(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# The grading below reads every prediction, line and snapshot and takes a couple of seconds, but the inputs only
+# change when the daily / evening jobs write. So results are cached against a cheap fingerprint of those tables and
+# recomputed only when it changes (or after DATA_TTL_S, as a backstop for writes the fingerprint can't see).
+DATA_TTL_S = 900
+_data_cache: dict[tuple, tuple[float, tuple, object]] = {}
+_data_locks: dict[tuple, Lock] = {}
+_data_locks_guard = Lock()
+
+
+def _fingerprint() -> tuple:
+    """One round trip whose result changes whenever a job adds or re-predicts predictions, fills actuals, finishes
+    games, or stores lines / pick snapshots. Counts and value sums rather than timestamps, because the jobs upsert and
+    an upsert doesn't touch updated_at."""
+    parts = [
+        func.count(), func.sum(Prediction.predicted), func.sum(Prediction.actual),
+    ], [
+        func.count(), func.sum(PlayerProp.line), func.sum(PlayerProp.over_odds), func.sum(PlayerProp.under_odds),
+    ], [
+        func.count(), func.sum(PickSnapshot.line), func.sum(PickSnapshot.predicted),
+    ]
+    sources = (Prediction, PlayerProp, PickSnapshot)
+    cols = [select(c).select_from(src).scalar_subquery() for src, cs in zip(sources, parts) for c in cs]
+    cols.append(select(func.count()).select_from(Game).where(Game.status == "final").scalar_subquery())
+    with SessionLocal() as s:
+        return tuple(s.execute(select(*cols)).one())
+
+
+def _cached(key: tuple, compute, fp: tuple | None = None):
+    """compute(), reused while the data fingerprint is unchanged. One computation per key at a time."""
+    with _data_locks_guard:
+        lock = _data_locks.setdefault(key, Lock())
+    fp = _fingerprint() if fp is None else fp
+    with lock:
+        hit = _data_cache.get(key)
+        if hit and hit[1] == fp and time.monotonic() - hit[0] < DATA_TTL_S:
+            return hit[2]
+        value = compute()
+        _data_cache[key] = (time.monotonic(), fp, value)
+        return value
+
+
 def _picks() -> pd.DataFrame:
+    return _cached(("picks",), _compute_picks)
+
+
+def _compute_picks() -> pd.DataFrame:
     """Every prediction that has a DraftKings line, graded against the stored (latest / closing) line.
 
     - Pick: "over" when the prediction is above the line, "under" when below (no pick when exactly on it).
@@ -436,25 +490,23 @@ def _top_performers(kind: str, picks: pd.DataFrame) -> list[dict]:
             .join(Game, Game.id == PlayerGameStat.game_id).join(Player, Player.id == PlayerGameStat.player_id, isouter=True)
             .join(Team, Team.id == PlayerGameStat.team_id, isouter=True).where(Game.date.in_(dates))
         ).all(), columns=["date", "player_id", "game_id", "player", "team", "pts", "reb", "ast"])
-    picks = picks.set_index(["player_id", "game_id", "stat"])
     preds["model_rank"] = preds.groupby(["date", "stat"])["predicted"].rank(ascending=False, method="min").astype(int)
-    preds = preds.set_index(["player_id", "game_id", "stat"])
-    out = []
-    for (d, stat), g in box.melt(id_vars=["date", "player_id", "game_id", "player", "team"], value_vars=["pts", "reb", "ast"],
-                                 var_name="stat", value_name="actual").groupby(["date", "stat"]):
-        top = g.sort_values(["actual", "player"], ascending=[False, True]).head(5)
-        for rank, r in enumerate(top.itertuples(), 1):
-            key = (r.player_id, r.game_id, stat)
-            pr = preds.loc[key] if key in preds.index else None
-            pk = picks.loc[key] if key in picks.index else None
-            out.append({
-                "date": str(d), "stat": stat, "rank": rank, "player_id": int(r.player_id), "player": r.player, "team": r.team,
-                "actual": int(r.actual), "predicted": None if pr is None else round(float(pr["predicted"]), 1),
-                "model_rank": None if pr is None else int(pr["model_rank"]),
-                "line": None if pk is None else float(pk["line"]), "pick": None if pk is None else pk["pick"],
-                "result": None if pk is None else pk["result"],
-            })
-    return out
+    keys = ["player_id", "game_id", "stat"]
+    top = (box.melt(id_vars=["date", "player_id", "game_id", "player", "team"], value_vars=["pts", "reb", "ast"],
+                    var_name="stat", value_name="actual")
+           .sort_values(["date", "stat", "actual", "player"], ascending=[True, True, False, True]))
+    top["rank"] = top.groupby(["date", "stat"]).cumcount() + 1
+    top = top[top["rank"] <= 5]
+    top = top.merge(preds[keys + ["predicted", "model_rank"]].drop_duplicates(keys), on=keys, how="left")
+    top = top.merge(picks[keys + ["line", "pick", "result"]].drop_duplicates(keys), on=keys, how="left")
+    return [{
+        "date": str(r.date), "stat": r.stat, "rank": int(r.rank), "player_id": int(r.player_id), "player": r.player,
+        "team": r.team, "actual": int(r.actual),
+        "predicted": None if pd.isna(r.predicted) else round(float(r.predicted), 1),
+        "model_rank": None if pd.isna(r.model_rank) else int(r.model_rank),
+        "line": None if pd.isna(r.line) else float(r.line),
+        "pick": None if pd.isna(r.pick) else r.pick, "result": None if pd.isna(r.result) else r.result,
+    } for r in top.itertuples()]
 
 
 def _json_rows(df: pd.DataFrame) -> list[dict]:
@@ -462,9 +514,34 @@ def _json_rows(df: pd.DataFrame) -> list[dict]:
 
 
 @app.get("/api/performance")
-def performance(kind: str = Query("live", pattern="^(live|backtest)$"), phase: str = Query("morning", pattern="^(morning|final)$")):
+def performance(request: Request, kind: str = Query("live", pattern="^(live|backtest)$"),
+                phase: str = Query("morning", pattern="^(morning|final)$")):
     """Over/under record, units and EV of the model's picks against DraftKings player props: all picks, each night's
     top 5 player-points picks (by biggest gap from the line and by confidence), and each night's top 5 performers."""
+    raw, packed = _cached(("performance", kind, phase), lambda: _encode(_performance(kind, phase)))
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        return Response(packed, media_type="application/json", headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+    return Response(raw, media_type="application/json", headers={"Vary": "Accept-Encoding"})
+
+
+def _encode(payload: dict) -> tuple[bytes, bytes]:
+    """The response body, encoded and gzipped once per data change instead of on every request (it's several MB)."""
+    raw = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode()
+    return raw, gzip.compress(raw, compresslevel=6)
+
+
+def _warm_performance():
+    """Fill the Performance cache in the background so page loads hit it."""
+    try:
+        fp = _fingerprint()
+        for phase in PHASES:
+            for kind in ("live", "backtest"):
+                _cached(("performance", kind, phase), lambda k=kind, p=phase: _encode(_performance(k, p)), fp)
+    except Exception:  # a cold cache is only slower, never wrong
+        log.exception("warming the performance cache failed")
+
+
+def _performance(kind: str, phase: str) -> dict:
     allp = _picks()
     views = {k: _view(allp, k, phase) for k in ("live", "backtest")}
     available = {k: int(v["result"].isin(DECIDED).sum()) for k, v in views.items()}
