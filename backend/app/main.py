@@ -31,7 +31,7 @@ from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, PickSnapsho
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()  # create any tables added since the last deploy (e.g. player_props) before serving
-    threading.Thread(target=_warm_performance, daemon=True).start()  # first visitor after a deploy shouldn't pay for it
+    threading.Thread(target=_refresh_loop, daemon=True).start()  # no visitor should pay for a rebuild
     yield
 
 
@@ -518,7 +518,9 @@ def performance(request: Request, kind: str = Query("live", pattern="^(live|back
                 phase: str = Query("morning", pattern="^(morning|final)$")):
     """Over/under record, units and EV of the model's picks against DraftKings player props: all picks, each night's
     top 5 player-points picks (by biggest gap from the line and by confidence), and each night's top 5 performers."""
-    raw, packed = _cached(("performance", kind, phase), lambda: _encode(_performance(kind, phase)))
+    key = ("performance", kind, phase)
+    hit = _data_cache.get(key)  # kept fresh by _refresh_loop, so a visitor never waits on a rebuild
+    raw, packed = hit[2] if hit else _cached(key, lambda: _encode(_performance(kind, phase)))
     if "gzip" in request.headers.get("accept-encoding", ""):
         return Response(packed, media_type="application/json", headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
     return Response(raw, media_type="application/json", headers={"Vary": "Accept-Encoding"})
@@ -530,15 +532,26 @@ def _encode(payload: dict) -> tuple[bytes, bytes]:
     return raw, gzip.compress(raw, compresslevel=6)
 
 
-def _warm_performance():
-    """Fill the Performance cache in the background so page loads hit it."""
-    try:
-        fp = _fingerprint()
-        for phase in PHASES:
-            for kind in ("live", "backtest"):
-                _cached(("performance", kind, phase), lambda k=kind, p=phase: _encode(_performance(k, p)), fp)
-    except Exception:  # a cold cache is only slower, never wrong
-        log.exception("warming the performance cache failed")
+REFRESH_EVERY_S = 60
+
+
+def _refresh_performance():
+    """Rebuild any Performance view whose data changed (or that is older than DATA_TTL_S). Visitors keep getting the
+    previous copy until the new one is ready."""
+    fp = _fingerprint()
+    for phase in PHASES:
+        for kind in ("live", "backtest"):
+            _cached(("performance", kind, phase), lambda k=kind, p=phase: _encode(_performance(k, p)), fp)
+
+
+def _refresh_loop():
+    """Fill the Performance cache at startup, then check for new data from the daily / 6pm jobs every minute."""
+    while True:
+        try:
+            _refresh_performance()
+        except Exception:  # a failed refresh only means a slower or older page, never a wrong one
+            log.exception("refreshing the performance cache failed")
+        time.sleep(REFRESH_EVERY_S)
 
 
 def _performance(kind: str, phase: str) -> dict:
