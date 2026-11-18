@@ -5,7 +5,7 @@ python -m app.ml.modelctl status                     what each stat is using rig
 python -m app.ml.modelctl pin <version> [target]     predict with this saved model (all stats unless one is named)
 python -m app.ml.modelctl unpin [target]             back to the newest promoted model
 python -m app.ml.modelctl features on|off|auto [target]
-    defender matchup features: force on, force off, or let the daily champion/challenger decide (the default)
+    defender features: force on, force off, or let the daily champion/challenger decide (the default)
 
 Every daily retrain is kept in model_runs, so any version listed can be pinned. A pin holds until unpinned; the
 daily job keeps training (and self-tuning) in the background, so unpinning picks up the newest model immediately.

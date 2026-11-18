@@ -92,7 +92,7 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
 
     # 1) Champion vs today's challengers on the most recent weeks, trained only on what came before them, judged on
     #    the players the bets are on: the rotating hyperparameter challenger, plus the champion with each feature set
-    #    (e.g. defender matchups) flipped. A challenger must beat the champion by MIN_IMPROVEMENT to take over.
+    #    (e.g. defender ratings) flipped. A challenger must beat the champion by MIN_IMPROVEMENT to take over.
     focus, focus_label = _focus(hold)
     champ = tuning.champion(target)
     challengers = [tuning.challenger(target, champ, today_et()), *tuning.feature_challengers(target, champ)]

@@ -226,31 +226,24 @@ class ModelConfig(Base):
     pinned_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
-class PlayerMatchup(Base):
-    """Who guarded whom in a game (NBA tracking, boxscorematchupsv3): one row per offensive player x defender."""
+class PlayerOnCourt(Base):
+    """Per player-game: time on the floor and the points the opponent scored meanwhile (from ESPN play-by-play),
+    plus the game totals, so on-court and off-court points allowed can be compared."""
 
-    __tablename__ = "player_matchups"
+    __tablename__ = "player_on_court"
     game_id: Mapped[str] = mapped_column(String(10), ForeignKey("games.id"), primary_key=True, index=True)
-    off_player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    def_player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    off_team_id: Mapped[int] = mapped_column(Integer)
-    def_team_id: Mapped[int] = mapped_column(Integer)
-    partial_poss: Mapped[float] = mapped_column(Float)  # possessions the pair spent matched up (fractional)
-    seconds: Mapped[float] = mapped_column(Float)
-    pts: Mapped[int] = mapped_column(Integer)  # scored by the offensive player while guarded by this defender
-    fgm: Mapped[int] = mapped_column(Integer)
-    fga: Mapped[int] = mapped_column(Integer)
-    fg3m: Mapped[int] = mapped_column(Integer)
-    fg3a: Mapped[int] = mapped_column(Integer)
-    fta: Mapped[int] = mapped_column(Integer)
-    ast: Mapped[int] = mapped_column(Integer)
-    tov: Mapped[int] = mapped_column(Integer)
+    player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_id: Mapped[int] = mapped_column(Integer)
+    on_seconds: Mapped[float] = mapped_column(Float)
+    opp_pts_on: Mapped[int] = mapped_column(Integer)  # opponent points while this player was on the floor
+    game_seconds: Mapped[float] = mapped_column(Float)
+    opp_pts_game: Mapped[int] = mapped_column(Integer)
 
 
-class MatchupFetch(Base):
-    """Games whose matchup data has been requested (so a game with no tracking data isn't re-requested every day)."""
+class OnCourtFetch(Base):
+    """Games whose play-by-play has been processed (so a game without usable play-by-play isn't requested daily)."""
 
-    __tablename__ = "matchup_fetches"
+    __tablename__ = "on_court_fetches"
     game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
     n_rows: Mapped[int] = mapped_column(Integer)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -1,66 +1,62 @@
-"""Opponent defender features: how good tonight's defenders are, and who is likely to guard the player.
+"""Opponent defender features: how good tonight's opposing defenders are.
 
-Built from the NBA's per-game matchup tracking (who guarded whom, in partial possessions). Everything is "as of
-before this game's date", so training rows never see the game they predict.
-
-Defender rating: points a defender allowed divided by the points those same scorers would normally score in that
-many possessions (1.00 = average, 0.90 = holds scorers 10% below their norm). Shrunk toward 1.00, so a defender with
-little tracked history counts as average rather than great or terrible.
+Built from on-court data (ESPN play-by-play, app.ingest.on_court). Each defender gets an on/off rating from games
+strictly before the row's date: the rate their team allows points with them on the floor divided by the rate with them
+off (0.95 = the team gives up 5% fewer points with them on). Both rates are shrunk toward the league average, so a
+player with little floor time counts as neutral (1.00) rather than great or terrible.
 
 For each player-game:
-- opp_def_rating_team: tonight's opposing defenders, weighted by their recent minutes
-- opp_def_rating_pos: the same, only defenders in the player's position group (G/F/C)
+- opp_def_rating_team: tonight's opposing players, weighted by their recent minutes
+- opp_def_rating_pos: the same, only opponents in the player's position group (G/F/C)
 - opp_def_rating_vs_usual: tonight's team rating minus the opponent's usual one (positive = a good defender is out)
-- likely_def_rating: defender ratings weighted by how much each of tonight's defenders has guarded this player before
-- likely_def_poss: how many tracked possessions that history covers (how much to trust the two above)
-- vs_likely_def_ratio: this player's own scoring against tonight's defenders, relative to their norm (shrunk to 1.00)
+- opp_pos_starter_def_rating: the opponent at the player's position with the most recent minutes (the likeliest
+  primary defender; actual matchup tracking isn't available from ESPN)
 
-Rows before the first tracked game are left missing, so the model can tell "no data" from "average defenders".
+Rows before the first game with on-court data are left missing, so the model can tell "no data" from "average".
 """
 
 import numpy as np
 import pandas as pd
 
-DEFENDER_FEATURES = [
-    "opp_def_rating_team", "opp_def_rating_pos", "opp_def_rating_vs_usual",
-    "likely_def_rating", "likely_def_poss", "vs_likely_def_ratio",
-]
-MATCHUP_COLS = ["game_id", "off_player_id", "def_player_id", "off_team_id", "def_team_id", "partial_poss", "pts"]
+DEFENDER_FEATURES = ["opp_def_rating_team", "opp_def_rating_pos", "opp_def_rating_vs_usual", "opp_pos_starter_def_rating"]
+ON_COURT_COLS = ["game_id", "player_id", "team_id", "on_seconds", "opp_pts_on", "game_seconds", "opp_pts_game"]
 
-K_OFF_POSS = 150.0  # scorer's own rate is shrunk toward league average by this many possessions
-K_DEF_PTS = 60.0  # defender rating is shrunk toward 1.00 by this many expected points (~ several games of guarding)
-K_PAIR_PTS = 20.0  # player-vs-these-defenders ratio is shrunk toward 1.00 by this many expected points
-DEFAULT_MINUTES = 15.0  # weight for a defender with no recent minutes (e.g. first game back)
+K_SECONDS = 7200.0  # each rate is shrunk toward league average by this much floor time (~4 full games for a starter)
+DEFAULT_MINUTES = 15.0  # weight for a player with no recent minutes (e.g. first game back)
 USUAL_WINDOW = 10
 
 
-def empty_matchups() -> pd.DataFrame:
-    return pd.DataFrame(columns=MATCHUP_COLS)
+def empty_on_court() -> pd.DataFrame:
+    return pd.DataFrame(columns=ON_COURT_COLS)
 
 
-def merge_defender_features(pg: pd.DataFrame, matchups: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
-    if matchups is None or matchups.empty:
+def merge_defender_features(pg: pd.DataFrame, on_court: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
+    oc = on_court[ON_COURT_COLS] if on_court is not None and not on_court.empty else empty_on_court()
+    oc = oc.merge(games[["id", "date"]].rename(columns={"id": "game_id"}), on="game_id")
+    oc = oc[oc["game_seconds"] > 0].copy()
+    if oc.empty:
         return pg.assign(**{c: np.nan for c in DEFENDER_FEATURES})
+    oc["date"] = pd.to_datetime(oc["date"])
+    coverage_start = oc["date"].min()
 
-    m = matchups[MATCHUP_COLS].merge(games[["id", "date"]].rename(columns={"id": "game_id"}), on="game_id")
-    m = m[m["partial_poss"] > 0].copy()
-    if m.empty:
-        return pg.assign(**{c: np.nan for c in DEFENDER_FEATURES})
-    m["date"] = pd.to_datetime(m["date"])
-    coverage_start = m["date"].min()
+    oc["off_seconds"] = (oc["game_seconds"] - oc["on_seconds"]).clip(lower=0)
+    oc["opp_pts_off"] = (oc["opp_pts_game"] - oc["opp_pts_on"]).clip(lower=0)
+    league_rate = oc["opp_pts_game"].sum() / oc["game_seconds"].sum()  # one game per team-row; ratio is unaffected
+    cols = ["on_seconds", "opp_pts_on", "off_seconds", "opp_pts_off"]
+    hist = oc.groupby(["player_id", "date"], as_index=False)[cols].sum().sort_values(["player_id", "date"])
+    hist[cols] = hist.groupby("player_id")[cols].cumsum()
+    on_rate = (hist["opp_pts_on"] + K_SECONDS * league_rate) / (hist["on_seconds"] + K_SECONDS)
+    off_rate = (hist["opp_pts_off"] + K_SECONDS * league_rate) / (hist["off_seconds"] + K_SECONDS)
+    hist["rating"] = on_rate / off_rate
 
-    m = _expected_points(m)
-    def_hist = _cumulative(m, ["def_player_id"], {"pts": "pts", "exp": "exp"})
-    def_hist["rating"] = (def_hist["pts"] + K_DEF_PTS) / (def_hist["exp"] + K_DEF_PTS)
-    pair_hist = _cumulative(m, ["off_player_id", "def_player_id"], {"partial_poss": "poss", "pts": "pts", "exp": "exp"})
-
-    # Tonight's defenders: every player in the game on the other team (actual for past games, expected for upcoming).
-    players = pg[["player_id", "team_id", "game_id", "date", "min_l10", "pos_group"]].copy()
-    players["date"] = pd.to_datetime(players["date"])
-    defenders = players.rename(columns={"player_id": "def_player_id", "team_id": "def_team_id", "pos_group": "def_pos"})
+    # Tonight's opponents: every player in the game on the other team (actual for past games, expected for upcoming).
+    defenders = pg[["player_id", "team_id", "game_id", "date", "min_l10", "pos_group"]].rename(
+        columns={"player_id": "def_player_id", "team_id": "def_team_id", "pos_group": "def_pos"}
+    )
+    defenders["date"] = pd.to_datetime(defenders["date"])
     defenders["w"] = defenders["min_l10"].fillna(DEFAULT_MINUTES).clip(lower=1.0)
-    defenders = _asof(defenders, def_hist[["def_player_id", "date", "rating"]], ["def_player_id"])
-    defenders["rating"] = defenders["rating"].fillna(1.0)  # no tracked history yet: treat as average
+    defenders = _asof(defenders, hist[["player_id", "date", "rating"]].rename(columns={"player_id": "def_player_id"}), ["def_player_id"])
+    defenders["rating"] = defenders["rating"].fillna(1.0)  # no on-court history yet: treat as neutral
 
     team = _weighted(defenders, ["game_id", "def_team_id"], "rating", "w").rename("opp_def_rating_team").reset_index()
     team = team.merge(defenders[["game_id", "def_team_id", "date"]].drop_duplicates(["game_id", "def_team_id"]), on=["game_id", "def_team_id"])
@@ -68,56 +64,15 @@ def merge_defender_features(pg: pd.DataFrame, matchups: pd.DataFrame, games: pd.
     usual = team.groupby("def_team_id")["opp_def_rating_team"].transform(lambda s: s.shift(1).rolling(USUAL_WINDOW, min_periods=1).mean())
     team["opp_def_rating_vs_usual"] = team["opp_def_rating_team"] - usual
     pos = _weighted(defenders, ["game_id", "def_team_id", "def_pos"], "rating", "w").rename("opp_def_rating_pos").reset_index()
+    starter = (defenders.sort_values("w", ascending=False).drop_duplicates(["game_id", "def_team_id", "def_pos"])
+               [["game_id", "def_team_id", "def_pos", "rating"]].rename(columns={"rating": "opp_pos_starter_def_rating"}))
 
-    out = pg.merge(team.drop(columns="date").rename(columns={"def_team_id": "opp_team_id"}), on=["game_id", "opp_team_id"], how="left")
-    out = out.merge(pos.rename(columns={"def_team_id": "opp_team_id", "def_pos": "pos_group"}), on=["game_id", "opp_team_id", "pos_group"], how="left")
-
-    # Likely defenders: this player's past possessions against each of tonight's defenders.
-    pairs = players[["player_id", "team_id", "game_id", "date"]].merge(
-        defenders[["def_player_id", "def_team_id", "game_id", "rating"]], on="game_id"
-    )
-    pairs = pairs[pairs["team_id"] != pairs["def_team_id"]].rename(columns={"player_id": "off_player_id"})
-    pairs = _asof(pairs, pair_hist, ["off_player_id", "def_player_id"])
-    pairs = pairs[pairs["poss"].fillna(0) > 0]
-    if pairs.empty:
-        likely = pd.DataFrame(columns=["player_id", "game_id", "likely_def_rating", "likely_def_poss", "vs_likely_def_ratio"])
-    else:
-        pairs["rating_x_poss"] = pairs["rating"] * pairs["poss"]
-        g = pairs.groupby(["off_player_id", "game_id"])[["poss", "pts", "exp", "rating_x_poss"]].sum()
-        likely = pd.DataFrame({
-            "likely_def_rating": g["rating_x_poss"] / g["poss"],
-            "likely_def_poss": g["poss"],
-            "vs_likely_def_ratio": (g["pts"] + K_PAIR_PTS) / (g["exp"] + K_PAIR_PTS),
-        }).reset_index().rename(columns={"off_player_id": "player_id"})
-    out = out.merge(likely, on=["player_id", "game_id"], how="left")
-
-    # Before the first tracked game there is nothing to go on; after it, no shared history means none of them has guarded this player yet.
-    before = pd.to_datetime(out["date"]) <= coverage_start
-    out.loc[before, DEFENDER_FEATURES] = np.nan
-    out.loc[~before, "likely_def_poss"] = out.loc[~before, "likely_def_poss"].fillna(0.0)
+    keys = {"def_team_id": "opp_team_id", "def_pos": "pos_group"}
+    out = pg.merge(team.drop(columns="date").rename(columns=keys), on=["game_id", "opp_team_id"], how="left")
+    out = out.merge(pos.rename(columns=keys), on=["game_id", "opp_team_id", "pos_group"], how="left")
+    out = out.merge(starter.rename(columns=keys), on=["game_id", "opp_team_id", "pos_group"], how="left")
+    out.loc[pd.to_datetime(out["date"]) <= coverage_start, DEFENDER_FEATURES] = np.nan
     return out
-
-
-def _expected_points(m: pd.DataFrame) -> pd.DataFrame:
-    """Points each matchup 'should' have produced: possessions x the scorer's own rate in games before this one."""
-    league_rate = m["pts"].sum() / m["partial_poss"].sum()
-    by_game = m.groupby(["off_player_id", "date"], as_index=False)[["pts", "partial_poss"]].sum().sort_values(["off_player_id", "date"])
-    grp = by_game.groupby("off_player_id")
-    prev_pts = grp["pts"].cumsum() - by_game["pts"]
-    prev_poss = grp["partial_poss"].cumsum() - by_game["partial_poss"]
-    by_game["off_rate"] = (prev_pts + K_OFF_POSS * league_rate) / (prev_poss + K_OFF_POSS)
-    m = m.merge(by_game[["off_player_id", "date", "off_rate"]], on=["off_player_id", "date"], how="left")
-    m["exp"] = m["partial_poss"] * m["off_rate"]
-    return m
-
-
-def _cumulative(m: pd.DataFrame, keys: list[str], cols: dict[str, str]) -> pd.DataFrame:
-    """Running totals per key through each date (inclusive); looked up strictly before a game's date."""
-    daily = m.groupby([*keys, "date"], as_index=False)[list(cols)].sum().rename(columns=cols)
-    daily = daily.sort_values([*keys, "date"])
-    vals = list(cols.values())
-    daily[vals] = daily.groupby(keys)[vals].cumsum()
-    return daily
 
 
 def _asof(left: pd.DataFrame, right: pd.DataFrame, by: list[str]) -> pd.DataFrame:
@@ -125,7 +80,7 @@ def _asof(left: pd.DataFrame, right: pd.DataFrame, by: list[str]) -> pd.DataFram
     left = left.reset_index(drop=True)
     left["_row"] = np.arange(len(left))
     l_sorted = left.sort_values("date")
-    r_sorted = right.sort_values("date")
+    r_sorted = right.sort_values("date").copy()
     for k in by:  # merge_asof needs identical key dtypes
         r_sorted[k] = r_sorted[k].astype(l_sorted[k].dtype)
     merged = pd.merge_asof(l_sorted, r_sorted, on="date", by=by, allow_exact_matches=False, direction="backward")

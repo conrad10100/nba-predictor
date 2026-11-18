@@ -10,7 +10,7 @@ DATES = pd.to_datetime(["2026-10-20", "2026-10-22", "2026-10-24", "2026-10-26"])
 
 
 def _frames() -> Frames:
-    games, ts, ps, mu = [], [], [], []
+    games, ts, ps, oc = [], [], [], []
     for i, d in enumerate(DATES):
         gid = f"00226{i:05d}"
         games.append({"id": gid, "date": d, "season": "2026-27", "home_team_id": A, "away_team_id": B, "status": "final"})
@@ -24,10 +24,10 @@ def _frames() -> Frames:
         ps.append({**box, "player_id": STAR, "team_id": A, "opp_team_id": B, "min": 36.0, "pts": 25})
         ps.append({**box, "player_id": GOOD, "team_id": B, "opp_team_id": A, "min": 34.0, "pts": 10})
         ps.append({**box, "player_id": ROOKIE, "team_id": B, "opp_team_id": A, "min": 20.0, "pts": 6})
-        # GOOD holds STAR to 4 points in 20 possessions; ROOKIE gives up 14 in 20.
-        for d_id, pts in ((GOOD, 4), (ROOKIE, 14)):
-            mu.append({"game_id": gid, "off_player_id": STAR, "def_player_id": d_id, "off_team_id": A, "def_team_id": B,
-                       "partial_poss": 20.0, "pts": pts})
+        # B allows points at 0.030/s with GOOD on and 0.057/s with GOOD off; with ROOKIE on it's the reverse.
+        for pid, team, on, pts_on in ((STAR, A, 2400.0, 90), (GOOD, B, 2000.0, 60), (ROOKIE, B, 1000.0, 50)):
+            oc.append({"game_id": gid, "player_id": pid, "team_id": team, "on_seconds": on, "opp_pts_on": pts_on,
+                       "game_seconds": 2880.0, "opp_pts_game": 110})
     teams = pd.DataFrame([
         {"id": A, "abbr": "AAA", "name": "A", "conference": "East", "division": "Atlantic"},
         {"id": B, "abbr": "BBB", "name": "B", "conference": "East", "division": "Central"},
@@ -37,7 +37,7 @@ def _frames() -> Frames:
         {"id": GOOD, "name": "Good", "team_id": B, "position": "G", "pos_group": "G"},
         {"id": ROOKIE, "name": "Rookie", "team_id": B, "position": "G", "pos_group": "G"},
     ])
-    return Frames(pd.DataFrame(ps), pd.DataFrame(ts), pd.DataFrame(games), players, teams, matchups=pd.DataFrame(mu))
+    return Frames(pd.DataFrame(ps), pd.DataFrame(ts), pd.DataFrame(games), players, teams, on_court=pd.DataFrame(oc))
 
 
 def _star(f: pd.DataFrame) -> pd.DataFrame:
@@ -50,11 +50,16 @@ def test_no_defender_features_before_tracking_starts():
 
 
 def test_defender_history_excludes_current_game():
-    s = _star(build_features(_frames()))
-    assert s.loc[1, "likely_def_poss"] == pytest.approx(40)  # game 0 only
-    assert s.loc[3, "likely_def_poss"] == pytest.approx(120)  # games 0-2, not game 3
-    # Against these two STAR scores 18 per 40 possessions every game, exactly his own norm, so the ratio is 1.
-    assert s.loc[3, "vs_likely_def_ratio"] == pytest.approx(1.0)
+    fr = _frames()
+    base = _star(build_features(fr))
+    # Rewrite the last game's on-court numbers: features for that game (built from earlier games) must not move.
+    oc = fr.on_court.copy()
+    last = oc["game_id"] == "0022600003"
+    oc.loc[last & (oc["player_id"] == GOOD), "opp_pts_on"] = 110
+    fr.on_court = oc
+    changed = _star(build_features(fr))
+    assert changed.loc[3, DEFENDER_FEATURES].tolist() == pytest.approx(base.loc[3, DEFENDER_FEATURES].tolist())
+    assert base.loc[2, "opp_def_rating_team"] < 1.0  # GOOD plays more minutes than ROOKIE
 
 
 def _upcoming(fr: Frames, out: set[int]) -> pd.Series:
@@ -71,8 +76,7 @@ def test_missing_good_defender_makes_matchup_easier():
     full, without_good = _upcoming(fr, set()), _upcoming(fr, {GOOD})
     assert without_good["opp_def_rating_team"] > full["opp_def_rating_team"]
     assert without_good["opp_def_rating_vs_usual"] > full["opp_def_rating_vs_usual"]
-    assert without_good["likely_def_rating"] > full["likely_def_rating"]  # only the rookie left to guard him
-    assert without_good["likely_def_poss"] < full["likely_def_poss"]
+    assert without_good["opp_pos_starter_def_rating"] > full["opp_pos_starter_def_rating"]  # the rookie steps in
 
 
 def test_defender_features_only_used_when_switched_on():
@@ -90,17 +94,40 @@ def test_good_defender_rates_better_than_rookie():
     assert only_good["opp_def_rating_pos"] == pytest.approx(only_good["opp_def_rating_team"])
 
 
-def test_matchup_parsing_and_orientation():
-    from app.ingest.matchups import _orient, parse
+def _athlete(aid, name, starter):
+    return {"athlete": {"id": aid, "displayName": name, "shortName": name}, "starter": starter, "stats": ["1"]}
 
-    df = pd.DataFrame([{
-        "teamId": A, "homeTeamId": A, "awayTeamId": B, "personIdOff": STAR, "personIdDef": GOOD, "matchupMinutes": "5:30",
-        "partialPossessions": 12.4, "playerPoints": 6, "matchupFieldGoalsMade": 3, "matchupFieldGoalsAttempted": 7,
-        "matchupThreePointersMade": 0, "matchupThreePointersAttempted": 2, "matchupFreeThrowsAttempted": 0,
-        "matchupAssists": 1, "matchupTurnovers": 0,
-    }])
-    rows = parse("0022600001", df)
-    assert rows[0]["def_team_id"] == B and rows[0]["seconds"] == 330 and rows[0]["pts"] == 6
-    assert _orient(rows, {STAR: A, GOOD: B}) == rows
-    swapped = _orient(rows, {STAR: B, GOOD: A})[0]
-    assert (swapped["off_player_id"], swapped["def_player_id"], swapped["def_team_id"]) == (GOOD, STAR, A)
+
+def _summary(plays):
+    box = []
+    for tid, abbr, prefix in (("1", "AAA", "H"), ("2", "BBB", "V")):
+        athletes = [_athlete(f"{prefix}{i}", f"{prefix} Player{i}", i <= 5) for i in range(1, 7)]
+        box.append({"team": {"id": tid, "abbreviation": abbr}, "statistics": [{"athletes": athletes}]})
+    comps = [{"homeAway": "home", "team": {"id": "1"}}, {"homeAway": "away", "team": {"id": "2"}}]
+    return {"boxscore": {"players": box}, "header": {"competitions": [{"competitors": comps}]}, "plays": plays}
+
+
+def _play(period, clock, home, away, text="", team=None, participants=()):
+    return {"period": {"number": period}, "clock": {"displayValue": clock}, "homeScore": home, "awayScore": away,
+            "text": text, "type": {"text": "Substitution" if "enters" in text else "Shot"},
+            "team": {"id": team} if team else {}, "participants": [{"athlete": {"id": p}} for p in participants]}
+
+
+def test_on_court_from_play_by_play():
+    from app.ingest.on_court import parse_summary
+
+    plays = [
+        _play(1, "11:00", 2, 0, "H Player1 makes layup", "1", ["H1"]),
+        _play(1, "6:00", 2, 0, "H Player6 enters the game for H Player5", "1", ["H6", "H5"]),
+        _play(1, "1:00", 2, 3, "V Player1 makes three", "2", ["V1"]),
+        # Quarter-break change, not logged: H5 is back for H6 and shows up acting before any sub.
+        _play(2, "11:30", 4, 3, "H Player5 makes jumper", "1", ["H5"]),
+        _play(3, "12:00", 4, 3), _play(4, "12:00", 4, 3),
+    ]
+    out = parse_summary(_summary(plays))
+    p = out["players"]
+    assert out["game_seconds"] == 2880 and out["pts"] == {"1": 4, "2": 3}
+    assert p["H5"]["on_seconds"] == pytest.approx(360 + 720 + 1440)  # half of Q1, then Q2-Q4
+    assert p["H6"]["on_seconds"] == pytest.approx(360)
+    assert p["H6"]["opp_pts_on"] == 3 and p["H5"]["opp_pts_on"] == 0
+    assert p["V1"]["opp_pts_on"] == 4 and "V6" not in p

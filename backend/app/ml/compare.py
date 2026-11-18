@@ -1,7 +1,7 @@
 """Before/after check for the defender features: walk forward through recent weeks, train the current champion
 settings with the defender features off and on (only on games before each week), and compare the misses.
 
-Nothing is stored; it only prints. Run it once the matchup history has been loaded (python -m app.ingest.matchups).
+Nothing is stored; it only prints. Run it once on-court history has been loaded (python -m app.ingest.on_court).
 
 python -m app.ml.compare [weeks=6]
 """

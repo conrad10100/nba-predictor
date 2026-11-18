@@ -19,7 +19,7 @@ from app.ingest.load import (
     dates_missing_props, load_espn_logs, load_game_lines, load_injuries, load_player_props, load_players, load_schedule,
     load_season_logs,
 )
-from app.ingest.matchups import DAILY_BACKFILL_GAMES, load_matchups, pending_games
+from app.ingest.on_court import DAILY_BACKFILL_GAMES, load_on_court, pending_games
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
@@ -30,7 +30,7 @@ from app.models import Game
 log = logging.getLogger("daily")
 
 RELOAD_DAYS = 3
-MATCHUP_TIME_BUDGET_S = 420  # cap on stats.nba.com matchup requests per morning run  # re-pull a few days back to pick up late stat corrections
+ON_COURT_TIME_BUDGET_S = 420  # cap on ESPN play-by-play requests per morning run  # re-pull a few days back to pick up late stat corrections
 
 FILL_ACTUALS = text("""
 UPDATE predictions SET actual = (
@@ -55,13 +55,14 @@ def run(refresh_only: bool = False) -> bool:
         ingest_ok = _ingest(today)
 
     if not refresh_only:
-        # Who guarded whom: last night's games first, then a batch of older games until history is filled in.
-        # Only feeds the defender features, so a failure here never stops the run.
+        # Who was on the floor (ESPN play-by-play): last night's games first, then a batch of older games until
+        # history is filled in. Only feeds the defender features, so a failure here never stops the run.
         try:
-            games, rows = load_matchups(pending_games(DAILY_BACKFILL_GAMES), time_budget_s=MATCHUP_TIME_BUDGET_S)
-            log.info("matchups: %d games, %d rows stored; %d games still to load", games, rows, len(pending_games()))
+            games, rows, unmatched = load_on_court(pending_games(DAILY_BACKFILL_GAMES), time_budget_s=ON_COURT_TIME_BUDGET_S)
+            log.info("on-court: %d games, %d player rows; %d unmatched %s; %d games still to load",
+                     games, rows, len(unmatched), sorted(unmatched)[:10], len(pending_games()))
         except Exception:
-            log.exception("matchups: failed, continuing without new ones")
+            log.exception("on-court: failed, continuing without new data")
         with engine.begin() as conn:
             log.info("filled actuals on %d predictions", conn.execute(FILL_ACTUALS).rowcount)
         for e in evaluate_pending(today):

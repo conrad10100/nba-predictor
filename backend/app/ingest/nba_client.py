@@ -7,7 +7,7 @@ from datetime import date
 
 import pandas as pd
 import requests
-from nba_api.stats.endpoints import boxscorematchupsv3, leaguegamelog, playerindex, scheduleleaguev2
+from nba_api.stats.endpoints import leaguegamelog, playerindex, scheduleleaguev2
 
 REQUEST_GAP_S = 1.0
 _last_call = 0.0
@@ -47,12 +47,6 @@ def season_schedule(season: str) -> pd.DataFrame:
 
 def player_index(season: str) -> pd.DataFrame:
     return _call(lambda: playerindex.PlayerIndex(season=season, timeout=60).get_data_frames()[0])
-
-
-def box_score_matchups(game_id: str) -> pd.DataFrame:
-    """Who guarded whom in one game: a row per offensive player x defender (personIdOff/personIdDef, teamId is the
-    offensive player's team), with partial possessions, matchup minutes and the offensive player's stats."""
-    return _call(lambda: boxscorematchupsv3.BoxScoreMatchupsV3(game_id=game_id, timeout=30).get_data_frames()[0], retries=3)
 
 
 def espn_injuries() -> list[dict]:
@@ -130,6 +124,24 @@ def espn_box_scores(on: date) -> list[dict]:
         out.append({"home": side["home"], "away": side["away"], "periods": max(4, int(status.get("period") or 4)),
                     "players": players, "team_tov": team_tov})
     return out
+
+
+def espn_completed_events(on: date) -> list[dict]:
+    """[{event_id, home, away}] for a date's finished games (NBA team abbreviations)."""
+    board = _call(lambda: requests.get(ESPN_SCOREBOARD_URL, params={"dates": on.strftime("%Y%m%d")}, timeout=30).json())
+    out = []
+    for event in board.get("events", []):
+        if not event["status"]["type"].get("completed"):
+            continue
+        comp = event["competitions"][0]
+        side = {t["homeAway"]: ESPN_TO_NBA_ABBR.get(t["team"]["abbreviation"], t["team"]["abbreviation"]) for t in comp["competitors"]}
+        out.append({"event_id": event["id"], "home": side["home"], "away": side["away"]})
+    return out
+
+
+def espn_summary(event_id: str) -> dict:
+    """ESPN's game summary: box score, rosters and play-by-play ("plays")."""
+    return _call(lambda: requests.get(ESPN_SUMMARY_URL, params={"event": event_id}, timeout=30).json())
 
 
 def _made_attempted(v: str) -> tuple[int, int]:
