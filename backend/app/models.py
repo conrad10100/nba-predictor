@@ -226,24 +226,16 @@ class ModelConfig(Base):
     pinned_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
-class PlayerOnCourt(Base):
-    """Per player-game: time on the floor and the points the opponent scored meanwhile (from ESPN play-by-play),
-    plus the game totals, so on-court and off-court points allowed can be compared."""
+class DefenderRating(Base):
+    """A player's defensive rating from Basketball-Reference (DBPM), as published on `as_of`.
 
-    __tablename__ = "player_on_court"
-    game_id: Mapped[str] = mapped_column(String(10), ForeignKey("games.id"), primary_key=True, index=True)
+    Past seasons are stored once as final ratings (as_of = the July 1 after the season); the current season gets a
+    snapshot each day, so features only ever use a rating that was published before the game.
+    """
+
+    __tablename__ = "defender_ratings"
     player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    team_id: Mapped[int] = mapped_column(Integer)
-    on_seconds: Mapped[float] = mapped_column(Float)
-    opp_pts_on: Mapped[int] = mapped_column(Integer)  # opponent points while this player was on the floor
-    game_seconds: Mapped[float] = mapped_column(Float)
-    opp_pts_game: Mapped[int] = mapped_column(Integer)
-
-
-class OnCourtFetch(Base):
-    """Games whose play-by-play has been processed (so a game without usable play-by-play isn't requested daily)."""
-
-    __tablename__ = "on_court_fetches"
-    game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
-    n_rows: Mapped[int] = mapped_column(Integer)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    season: Mapped[str] = mapped_column(String(7), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date, primary_key=True)
+    dbpm: Mapped[float] = mapped_column(Float)  # defensive box plus/minus: points per 100 possessions vs. average, + is better
+    minutes: Mapped[float] = mapped_column(Float)

@@ -19,7 +19,7 @@ from app.ingest.load import (
     dates_missing_props, load_espn_logs, load_game_lines, load_injuries, load_player_props, load_players, load_schedule,
     load_season_logs,
 )
-from app.ingest.on_court import DAILY_BACKFILL_GAMES, load_on_court, pending_games
+from app.ingest import defense
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
@@ -29,8 +29,7 @@ from app.models import Game
 
 log = logging.getLogger("daily")
 
-RELOAD_DAYS = 3
-ON_COURT_TIME_BUDGET_S = 420  # cap on ESPN play-by-play requests per morning run  # re-pull a few days back to pick up late stat corrections
+RELOAD_DAYS = 3  # re-pull a few days back to pick up late stat corrections
 
 FILL_ACTUALS = text("""
 UPDATE predictions SET actual = (
@@ -55,14 +54,13 @@ def run(refresh_only: bool = False) -> bool:
         ingest_ok = _ingest(today)
 
     if not refresh_only:
-        # Who was on the floor (ESPN play-by-play): last night's games first, then a batch of older games until
-        # history is filled in. Only feeds the defender features, so a failure here never stops the run.
+        # Defensive ratings (Basketball-Reference DBPM): today's snapshot, plus any past season not stored yet.
+        # Only feeds the defender features, so a failure here never stops the run.
         try:
-            games, rows, unmatched = load_on_court(pending_games(DAILY_BACKFILL_GAMES), time_budget_s=ON_COURT_TIME_BUDGET_S)
-            log.info("on-court: %d games, %d player rows; %d unmatched %s; %d games still to load",
-                     games, rows, len(unmatched), sorted(unmatched)[:10], len(pending_games()))
+            for season, (n, unmatched) in defense.run(today).items():
+                log.info("defender ratings %s: %d stored, %d unmatched %s", season, n, len(unmatched), unmatched[:10])
         except Exception:
-            log.exception("on-court: failed, continuing without new data")
+            log.exception("defender ratings: failed, continuing without new ones")
         with engine.begin() as conn:
             log.info("filled actuals on %d predictions", conn.execute(FILL_ACTUALS).rowcount)
         for e in evaluate_pending(today):

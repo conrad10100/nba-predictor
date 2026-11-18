@@ -126,22 +126,43 @@ def espn_box_scores(on: date) -> list[dict]:
     return out
 
 
-def espn_completed_events(on: date) -> list[dict]:
-    """[{event_id, home, away}] for a date's finished games (NBA team abbreviations)."""
-    board = _call(lambda: requests.get(ESPN_SCOREBOARD_URL, params={"dates": on.strftime("%Y%m%d")}, timeout=30).json())
-    out = []
-    for event in board.get("events", []):
-        if not event["status"]["type"].get("completed"):
+BBREF_ADVANCED_URL = "https://www.basketball-reference.com/leagues/NBA_{end_year}_advanced.html"
+# Basketball-Reference abbreviations that differ from the NBA's.
+BBREF_TO_NBA_ABBR = {"BRK": "BKN", "CHO": "CHA", "PHO": "PHX"}
+_CELL_RE = re.compile(r'<t[hd][^>]*data-stat="([^"]+)"[^>]*>(.*?)</t[hd]>', re.S)
+_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+_SLUG_RE = re.compile(r'data-append-csv="([^"]+)"')
+
+
+def bbref_defense(season: str) -> list[dict]:
+    """[{name, slug, team, minutes, dbpm}] for every player in a season's Basketball-Reference advanced table.
+
+    One request per season. A player who changed teams appears once, with their combined line.
+    """
+    end_year = int(season[:4]) + 1
+    resp = _call(lambda: requests.get(BBREF_ADVANCED_URL.format(end_year=end_year), timeout=30,
+                                      headers={"User-Agent": "Mozilla/5.0 (compatible; nba-predictor)"}))
+    resp.raise_for_status()
+    return parse_bbref_advanced(resp.text)
+
+
+def parse_bbref_advanced(html: str) -> list[dict]:
+    start = html.find('id="advanced')
+    body = html[start:] if start >= 0 else html
+    end = body.find("</table>")
+    body = body[: end if end >= 0 else None]
+    out, seen = [], set()
+    for row in _ROW_RE.findall(body):
+        cells = {k: re.sub(r"<[^>]+>", "", v).strip() for k, v in _CELL_RE.findall(row)}
+        name = cells.get("name_display") or cells.get("player")
+        dbpm, minutes = _float(cells.get("dbpm")), _float(cells.get("mp"))
+        slug = (_SLUG_RE.search(row) or [None, name])[1]
+        if not name or dbpm is None or minutes is None or slug in seen or name == "League Average":
             continue
-        comp = event["competitions"][0]
-        side = {t["homeAway"]: ESPN_TO_NBA_ABBR.get(t["team"]["abbreviation"], t["team"]["abbreviation"]) for t in comp["competitors"]}
-        out.append({"event_id": event["id"], "home": side["home"], "away": side["away"]})
+        seen.add(slug)  # combined line (TOT / 2TM) comes first for players who changed teams
+        team = cells.get("team_name_abbr") or cells.get("team_id") or ""
+        out.append({"name": name.rstrip("*"), "slug": slug, "team": BBREF_TO_NBA_ABBR.get(team, team), "minutes": minutes, "dbpm": dbpm})
     return out
-
-
-def espn_summary(event_id: str) -> dict:
-    """ESPN's game summary: box score, rosters and play-by-play ("plays")."""
-    return _call(lambda: requests.get(ESPN_SUMMARY_URL, params={"event": event_id}, timeout=30).json())
 
 
 def _made_attempted(v: str) -> tuple[int, int]:

@@ -11,8 +11,8 @@ import pandas as pd
 from sqlalchemy import select
 
 from app.db import engine
-from app.features.defenders import DEFENDER_FEATURES, ON_COURT_COLS, empty_on_court, merge_defender_features
-from app.models import Game, GameLine, Player, PlayerGameStat, PlayerOnCourt, Team, TeamGameStat
+from app.features.defenders import DEFENDER_FEATURES, RATING_COLS, empty_ratings, merge_defender_features
+from app.models import DefenderRating, Game, GameLine, Player, PlayerGameStat, Team, TeamGameStat
 
 TARGETS = ["pts", "reb", "ast"]
 PLAYER_ROLL_COLS = ["pts", "reb", "ast", "min", "fga", "fta", "fg3a", "usg"]
@@ -80,7 +80,7 @@ class Frames:
     players: pd.DataFrame
     teams: pd.DataFrame
     lines: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["game_id", "home_spread", "total"]))
-    on_court: pd.DataFrame = field(default_factory=empty_on_court)  # floor time and points allowed (player_on_court)
+    defender_ratings: pd.DataFrame = field(default_factory=empty_ratings)  # DBPM snapshots (defender_ratings)
 
 
 def load_frames() -> Frames:
@@ -91,8 +91,8 @@ def load_frames() -> Frames:
         players = pd.read_sql(select(Player), conn)
         teams = pd.read_sql(select(Team), conn)
         lines = pd.read_sql(select(GameLine.game_id, GameLine.home_spread, GameLine.total), conn)
-        on_court = pd.read_sql(select(*[getattr(PlayerOnCourt, c) for c in ON_COURT_COLS]), conn)
-    return Frames(ps, ts, games, players, teams, lines, on_court)
+        ratings = pd.read_sql(select(*[getattr(DefenderRating, c) for c in RATING_COLS]), conn)
+    return Frames(ps, ts, games, players, teams, lines, ratings)
 
 
 @dataclass
@@ -116,7 +116,7 @@ def build_features(fr: Frames, upcoming: Upcoming | None = None) -> pd.DataFrame
     pg = _merge_team_context(pg, tg, fr.teams)
     pg = _merge_positional_defense(pg, fr.players)
     pg = _merge_missing_teammates(pg, upcoming)
-    pg = merge_defender_features(pg, fr.on_court, games)
+    pg = merge_defender_features(pg, fr.defender_ratings)
     return pg.copy()
 
 

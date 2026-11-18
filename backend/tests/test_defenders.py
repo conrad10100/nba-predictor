@@ -10,7 +10,7 @@ DATES = pd.to_datetime(["2026-10-20", "2026-10-22", "2026-10-24", "2026-10-26"])
 
 
 def _frames() -> Frames:
-    games, ts, ps, oc = [], [], [], []
+    games, ts, ps = [], [], []
     for i, d in enumerate(DATES):
         gid = f"00226{i:05d}"
         games.append({"id": gid, "date": d, "season": "2026-27", "home_team_id": A, "away_team_id": B, "status": "final"})
@@ -24,10 +24,6 @@ def _frames() -> Frames:
         ps.append({**box, "player_id": STAR, "team_id": A, "opp_team_id": B, "min": 36.0, "pts": 25})
         ps.append({**box, "player_id": GOOD, "team_id": B, "opp_team_id": A, "min": 34.0, "pts": 10})
         ps.append({**box, "player_id": ROOKIE, "team_id": B, "opp_team_id": A, "min": 20.0, "pts": 6})
-        # B allows points at 0.030/s with GOOD on and 0.057/s with GOOD off; with ROOKIE on it's the reverse.
-        for pid, team, on, pts_on in ((STAR, A, 2400.0, 90), (GOOD, B, 2000.0, 60), (ROOKIE, B, 1000.0, 50)):
-            oc.append({"game_id": gid, "player_id": pid, "team_id": team, "on_seconds": on, "opp_pts_on": pts_on,
-                       "game_seconds": 2880.0, "opp_pts_game": 110})
     teams = pd.DataFrame([
         {"id": A, "abbr": "AAA", "name": "A", "conference": "East", "division": "Atlantic"},
         {"id": B, "abbr": "BBB", "name": "B", "conference": "East", "division": "Central"},
@@ -37,29 +33,38 @@ def _frames() -> Frames:
         {"id": GOOD, "name": "Good", "team_id": B, "position": "G", "pos_group": "G"},
         {"id": ROOKIE, "name": "Rookie", "team_id": B, "position": "G", "pos_group": "G"},
     ])
-    return Frames(pd.DataFrame(ps), pd.DataFrame(ts), pd.DataFrame(games), players, teams, on_court=pd.DataFrame(oc))
+    # Last season's final DBPM: GOOD is an elite defender, ROOKIE has none (counts as average). A snapshot of this
+    # season is published on game 3's date, which must not reach game 3 itself.
+    ratings = pd.DataFrame([
+        {"player_id": GOOD, "season": "2025-26", "as_of": pd.Timestamp("2026-07-01"), "dbpm": 3.0, "minutes": 2500.0},
+        {"player_id": STAR, "season": "2025-26", "as_of": pd.Timestamp("2026-07-01"), "dbpm": -1.0, "minutes": 2500.0},
+        {"player_id": GOOD, "season": "2026-27", "as_of": DATES[3], "dbpm": -6.0, "minutes": 2000.0},
+    ])
+    return Frames(pd.DataFrame(ps), pd.DataFrame(ts), pd.DataFrame(games), players, teams, defender_ratings=ratings)
 
 
 def _star(f: pd.DataFrame) -> pd.DataFrame:
     return f[f["player_id"] == STAR].sort_values("date").reset_index(drop=True)
 
 
-def test_no_defender_features_before_tracking_starts():
-    s = _star(build_features(_frames()))
-    assert s.loc[0, DEFENDER_FEATURES].isna().all()
-
-
-def test_defender_history_excludes_current_game():
+def test_no_defender_features_without_ratings():
     fr = _frames()
-    base = _star(build_features(fr))
-    # Rewrite the last game's on-court numbers: features for that game (built from earlier games) must not move.
-    oc = fr.on_court.copy()
-    last = oc["game_id"] == "0022600003"
-    oc.loc[last & (oc["player_id"] == GOOD), "opp_pts_on"] = 110
-    fr.on_court = oc
-    changed = _star(build_features(fr))
-    assert changed.loc[3, DEFENDER_FEATURES].tolist() == pytest.approx(base.loc[3, DEFENDER_FEATURES].tolist())
-    assert base.loc[2, "opp_def_rating_team"] < 1.0  # GOOD plays more minutes than ROOKIE
+    fr.defender_ratings = fr.defender_ratings.iloc[0:0]
+    assert _star(build_features(fr))[DEFENDER_FEATURES].isna().all().all()
+
+
+def test_rating_uses_only_what_was_published_before_the_game():
+    s = _star(build_features(_frames()))
+    # Through game 3 only last season's ratings exist: GOOD 3.0 shrunk by 2500/(2500+500) = 2.5, ROOKIE 0 (no data).
+    assert s.loc[3, "opp_pos_starter_def_dbpm"] == pytest.approx(2.5)  # GOOD plays the most minutes
+    assert s.loc[3, "opp_def_dbpm_team"] == pytest.approx((2.5 * 34 + 0 * 20) / 54)
+
+
+def test_new_snapshot_applies_after_its_date():
+    fr = _frames()
+    up = _upcoming(fr, set())
+    # Game after the snapshot: GOOD = (-6 * 2000 + 2.5 * 800) / 2800
+    assert up["opp_pos_starter_def_dbpm"] == pytest.approx((-6 * 2000 + 2.5 * 800) / 2800)
 
 
 def _upcoming(fr: Frames, out: set[int]) -> pd.Series:
@@ -73,10 +78,11 @@ def _upcoming(fr: Frames, out: set[int]) -> pd.Series:
 
 def test_missing_good_defender_makes_matchup_easier():
     fr = _frames()
+    fr.defender_ratings = fr.defender_ratings.iloc[:2]  # last season's ratings only
     full, without_good = _upcoming(fr, set()), _upcoming(fr, {GOOD})
-    assert without_good["opp_def_rating_team"] > full["opp_def_rating_team"]
-    assert without_good["opp_def_rating_vs_usual"] > full["opp_def_rating_vs_usual"]
-    assert without_good["opp_pos_starter_def_rating"] > full["opp_pos_starter_def_rating"]  # the rookie steps in
+    assert without_good["opp_def_dbpm_team"] < full["opp_def_dbpm_team"]
+    assert without_good["opp_def_dbpm_vs_usual"] < 0 < full["opp_def_dbpm_vs_usual"] + 1e-9
+    assert without_good["opp_pos_starter_def_dbpm"] == 0 < full["opp_pos_starter_def_dbpm"]  # the rookie steps in
 
 
 def test_defender_features_only_used_when_switched_on():
@@ -87,47 +93,18 @@ def test_defender_features_only_used_when_switched_on():
     assert set(DEFENDER_FEATURES) <= set(usable_features(rows, {"defender_features": 1}))
 
 
-def test_good_defender_rates_better_than_rookie():
-    fr = _frames()
-    only_good, only_rookie = _upcoming(fr, {ROOKIE}), _upcoming(fr, {GOOD})
-    assert only_good["opp_def_rating_team"] < 1.0 < only_rookie["opp_def_rating_team"]
-    assert only_good["opp_def_rating_pos"] == pytest.approx(only_good["opp_def_rating_team"])
+def test_basketball_reference_table_parsing():
+    from app.ingest.nba_client import parse_bbref_advanced
 
-
-def _athlete(aid, name, starter):
-    return {"athlete": {"id": aid, "displayName": name, "shortName": name}, "starter": starter, "stats": ["1"]}
-
-
-def _summary(plays):
-    box = []
-    for tid, abbr, prefix in (("1", "AAA", "H"), ("2", "BBB", "V")):
-        athletes = [_athlete(f"{prefix}{i}", f"{prefix} Player{i}", i <= 5) for i in range(1, 7)]
-        box.append({"team": {"id": tid, "abbreviation": abbr}, "statistics": [{"athletes": athletes}]})
-    comps = [{"homeAway": "home", "team": {"id": "1"}}, {"homeAway": "away", "team": {"id": "2"}}]
-    return {"boxscore": {"players": box}, "header": {"competitions": [{"competitors": comps}]}, "plays": plays}
-
-
-def _play(period, clock, home, away, text="", team=None, participants=()):
-    return {"period": {"number": period}, "clock": {"displayValue": clock}, "homeScore": home, "awayScore": away,
-            "text": text, "type": {"text": "Substitution" if "enters" in text else "Shot"},
-            "team": {"id": team} if team else {}, "participants": [{"athlete": {"id": p}} for p in participants]}
-
-
-def test_on_court_from_play_by_play():
-    from app.ingest.on_court import parse_summary
-
-    plays = [
-        _play(1, "11:00", 2, 0, "H Player1 makes layup", "1", ["H1"]),
-        _play(1, "6:00", 2, 0, "H Player6 enters the game for H Player5", "1", ["H6", "H5"]),
-        _play(1, "1:00", 2, 3, "V Player1 makes three", "2", ["V1"]),
-        # Quarter-break change, not logged: H5 is back for H6 and shows up acting before any sub.
-        _play(2, "11:30", 4, 3, "H Player5 makes jumper", "1", ["H5"]),
-        _play(3, "12:00", 4, 3), _play(4, "12:00", 4, 3),
+    def row(slug, name, team, mp, dbpm):
+        return (f'<tr><th data-stat="ranker">1</th><td data-append-csv="{slug}" data-stat="name_display"><a href="#">{name}</a></td>'
+                f'<td data-stat="team_name_abbr">{team}</td><td data-stat="mp">{mp}</td><td data-stat="dbpm">{dbpm}</td></tr>')
+    html = ('<table id="advanced"><thead><tr><th data-stat="ranker">Rk</th></tr></thead><tbody>'
+            + row("goodpl01", "Good Player", "BRK", "1500", "2.1") + row("trade01", "Traded Guy", "2TM", "900", "-0.4")
+            + row("trade01", "Traded Guy", "PHO", "400", "1.0") + '<tr class="thead"><th data-stat="ranker">Rk</th></tr>'
+            + row("lgavg", "League Average", "", "", "0.0") + "</tbody></table>")
+    out = parse_bbref_advanced(html)
+    assert out == [
+        {"name": "Good Player", "slug": "goodpl01", "team": "BKN", "minutes": 1500.0, "dbpm": 2.1},
+        {"name": "Traded Guy", "slug": "trade01", "team": "2TM", "minutes": 900.0, "dbpm": -0.4},
     ]
-    out = parse_summary(_summary(plays))
-    p = out["players"]
-    assert out["game_seconds"] == 2880 and out["pts"] == {"1": 4, "2": 3}
-    assert p["H5"]["on_seconds"] == pytest.approx(360 + 720 + 1440)  # half of Q1, then Q2-Q4
-    assert p["H6"]["on_seconds"] == pytest.approx(360)
-    assert p["H6"]["opp_pts_on"] == 3 and p["H5"]["opp_pts_on"] == 0
-    assert p["V1"]["opp_pts_on"] == 4 and "V6" not in p
