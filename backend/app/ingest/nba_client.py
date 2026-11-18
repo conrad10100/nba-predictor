@@ -7,7 +7,7 @@ from datetime import date
 
 import pandas as pd
 import requests
-from nba_api.stats.endpoints import leaguegamelog, playerindex, scheduleleaguev2
+from nba_api.stats.endpoints import boxscorematchupsv3, leaguegamelog, playerindex, scheduleleaguev2
 
 REQUEST_GAP_S = 1.0
 _last_call = 0.0
@@ -47,6 +47,12 @@ def season_schedule(season: str) -> pd.DataFrame:
 
 def player_index(season: str) -> pd.DataFrame:
     return _call(lambda: playerindex.PlayerIndex(season=season, timeout=60).get_data_frames()[0])
+
+
+def box_score_matchups(game_id: str) -> pd.DataFrame:
+    """Who guarded whom in one game: a row per offensive player x defender (personIdOff/personIdDef, teamId is the
+    offensive player's team), with partial possessions, matchup minutes and the offensive player's stats."""
+    return _call(lambda: boxscorematchupsv3.BoxScoreMatchupsV3(game_id=game_id, timeout=30).get_data_frames()[0], retries=3)
 
 
 def espn_injuries() -> list[dict]:

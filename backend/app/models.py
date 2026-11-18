@@ -220,3 +220,37 @@ class ModelConfig(Base):
     bias_correction: Mapped[float] = mapped_column(Float, default=0.0)  # added to raw predictions
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Manual controls (python -m app.ml.modelctl). Settings in locked_params override the self-tuned champion and are
+    # never changed by a challenger; pinned_version makes predictions use that stored model instead of the newest.
+    locked_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    pinned_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class PlayerMatchup(Base):
+    """Who guarded whom in a game (NBA tracking, boxscorematchupsv3): one row per offensive player x defender."""
+
+    __tablename__ = "player_matchups"
+    game_id: Mapped[str] = mapped_column(String(10), ForeignKey("games.id"), primary_key=True, index=True)
+    off_player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    def_player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    off_team_id: Mapped[int] = mapped_column(Integer)
+    def_team_id: Mapped[int] = mapped_column(Integer)
+    partial_poss: Mapped[float] = mapped_column(Float)  # possessions the pair spent matched up (fractional)
+    seconds: Mapped[float] = mapped_column(Float)
+    pts: Mapped[int] = mapped_column(Integer)  # scored by the offensive player while guarded by this defender
+    fgm: Mapped[int] = mapped_column(Integer)
+    fga: Mapped[int] = mapped_column(Integer)
+    fg3m: Mapped[int] = mapped_column(Integer)
+    fg3a: Mapped[int] = mapped_column(Integer)
+    fta: Mapped[int] = mapped_column(Integer)
+    ast: Mapped[int] = mapped_column(Integer)
+    tov: Mapped[int] = mapped_column(Integer)
+
+
+class MatchupFetch(Base):
+    """Games whose matchup data has been requested (so a game with no tracking data isn't re-requested every day)."""
+
+    __tablename__ = "matchup_fetches"
+    game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    n_rows: Mapped[int] = mapped_column(Integer)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

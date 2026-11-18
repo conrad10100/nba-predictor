@@ -5,7 +5,7 @@ import joblib
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import ModelRun
+from app.models import ModelConfig, ModelRun
 
 
 def dump(bundle: dict) -> bytes:
@@ -15,7 +15,13 @@ def dump(bundle: dict) -> bytes:
 
 
 def active_version(target: str) -> str | None:
+    """The pinned version if one is set (python -m app.ml.modelctl pin), else the newest promoted model."""
     with SessionLocal() as s:
+        cfg = s.get(ModelConfig, target)
+        if cfg is not None and cfg.pinned_version:
+            exists = s.scalar(select(ModelRun.version).where(ModelRun.version == cfg.pinned_version, ModelRun.target == target))
+            if exists:
+                return exists
         return s.scalar(
             select(ModelRun.version).where(ModelRun.target == target, ModelRun.promoted).order_by(ModelRun.trained_at.desc()).limit(1)
         )
@@ -29,6 +35,6 @@ def _load(version: str, target: str) -> dict:
 
 
 def load_active(target: str) -> tuple[str, dict] | None:
-    """(version, {"point": model, "p10": model, "p90": model, "features": [...]}) for the newest promoted model."""
+    """(version, {"point": model, "interval": ..., "features": [...]}) for the pinned or newest promoted model."""
     version = active_version(target)
     return (version, _load(version, target)) if version else None

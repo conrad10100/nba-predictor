@@ -14,7 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from app.clock import today_et
 from app.config import TARGETS as ACTIVE_TARGETS
 from app.db import SessionLocal, upsert
-from app.features.build import FEATURES, build_features, load_frames, training_rows
+from app.features.build import DEFENDER_FEATURES, FEATURES, build_features, load_frames, training_rows
 from app.ml import intervals, tuning
 from app.ml.registry import dump
 from app.ml.xgb import XGBModel
@@ -22,7 +22,7 @@ from app.models import ModelRun, PlayerProp
 
 HOLDOUT_DAYS = 21
 MAX_ITER = 800
-NOT_MODEL_PARAMS = ("half_life_days", "model", "minutes_weight")  # training settings, not estimator arguments
+NOT_MODEL_PARAMS = ("half_life_days", "model", "minutes_weight", "defender_features")  # training settings, not estimator arguments
 MINUTES_REF = 30.0  # a player averaging this many minutes counts fully under minutes weighting
 ROTATION_MIN = 20.0  # fallback definition of "players with lines" before lines were stored
 MIN_LINE_ROWS = 200  # need this many holdout rows with DraftKings lines to judge on them
@@ -66,19 +66,21 @@ def _focus(hold: pd.DataFrame) -> tuple[np.ndarray, str]:
     return (hold["min_l10"] >= ROTATION_MIN).to_numpy(), f"rotation players ({ROTATION_MIN:.0f}+ min)"
 
 
-def usable_features(train: pd.DataFrame) -> list[str]:
-    """FEATURES that have at least one value in `train`.
+def usable_features(train: pd.DataFrame, params: dict | None = None) -> list[str]:
+    """FEATURES that have at least one value in `train` (leaving out the defender features unless `params` turns them on).
 
     A brand-new feature (e.g. sportsbook lines, only recorded going forward) is entirely missing from the
     training window at first, and HistGradientBoostingRegressor crashes on an all-missing column. Leave such
     features out until they have data; the model bundle records which features it was trained on.
     """
-    return [f for f in FEATURES if train[f].notna().any()]
+    skip = set() if params and params.get("defender_features") else set(DEFENDER_FEATURES)
+    return [f for f in FEATURES if f not in skip and f in train and train[f].notna().any()]
 
 
-def _score(params: dict, train: pd.DataFrame, hold: pd.DataFrame, target: str, feats: list[str],
+def _score(params: dict, train: pd.DataFrame, hold: pd.DataFrame, target: str,
            focus: np.ndarray) -> tuple[float, float, object]:
     """(MAE on the focus players, MAE on everyone, fitted model)."""
+    feats = usable_features(train, params)
     m = _model(params).fit(train[feats], train[target], sample_weight=_weights(train, params))
     pred = m.predict(hold[feats])
     return mean_absolute_error(hold[target][focus], pred[focus]), mean_absolute_error(hold[target], pred), m
@@ -87,22 +89,29 @@ def _score(params: dict, train: pd.DataFrame, hold: pd.DataFrame, target: str, f
 def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
     cutoff = rows["date"].max() - pd.Timedelta(days=HOLDOUT_DAYS)
     train, hold = rows[rows["date"] <= cutoff], rows[rows["date"] > cutoff]
-    feats = usable_features(train)
 
-    # 1) Champion vs today's challenger on the most recent weeks, trained only on what came before them, judged on
-    #    the players the bets are on.
+    # 1) Champion vs today's challengers on the most recent weeks, trained only on what came before them, judged on
+    #    the players the bets are on: the rotating hyperparameter challenger, plus the champion with each feature set
+    #    (e.g. defender matchups) flipped. A challenger must beat the champion by MIN_IMPROVEMENT to take over.
     focus, focus_label = _focus(hold)
     champ = tuning.champion(target)
-    chall = tuning.challenger(target, champ, today_et())
-    champ_focus, champ_mae, champ_model = _score(champ, train, hold, target, feats, focus)
-    chall_focus, chall_mae, chall_model = _score(chall, train, hold, target, feats, focus) if chall != champ else (np.inf, np.inf, None)
+    challengers = [tuning.challenger(target, champ, today_et()), *tuning.feature_challengers(target, champ)]
+    challengers = [c for i, c in enumerate(challengers) if c != champ and c not in challengers[:i]]
+    champ_focus, champ_mae, champ_model = _score(champ, train, hold, target, focus)
     judged = f"MAE on {focus_label} (n={int(focus.sum())})"
-    if chall_focus < champ_focus * (1 - tuning.MIN_IMPROVEMENT):
-        params, point, mae = chall, chall_model, chall_mae
-        note = f"challenger won: {judged} {chall_focus:.3f} < {champ_focus:.3f} with {_diff(champ, chall)}"
+    params, point, mae, best_focus = champ, champ_model, champ_mae, champ_focus
+    results = []
+    for chall in challengers:
+        c_focus, c_mae, c_model = _score(chall, train, hold, target, focus)
+        results.append(f"{_diff(champ, chall)} {c_focus:.3f}")
+        if c_focus < champ_focus * (1 - tuning.MIN_IMPROVEMENT) and c_focus < best_focus:
+            params, point, mae, best_focus = chall, c_model, c_mae, c_focus
+    if params is champ:
+        note = f"champion kept: {judged} {champ_focus:.3f} vs challengers " + "; ".join(results)
     else:
-        params, point, mae = champ, champ_model, champ_mae
-        note = f"champion kept: {judged} {champ_focus:.3f} vs challenger {_diff(champ, chall)} {chall_focus:.3f}"
+        note = f"challenger won: {judged} {best_focus:.3f} < {champ_focus:.3f} with {_diff(champ, params)} (all: " + "; ".join(results) + ")"
+    note = note[:512]
+    feats = usable_features(train, params)
     tuning.save_champion(target, params, note)
 
     pred = point.predict(hold[feats])
