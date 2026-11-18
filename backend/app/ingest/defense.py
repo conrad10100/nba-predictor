@@ -3,7 +3,8 @@
 The daily run stores today's snapshot of the current season; past seasons are stored once as final ratings. So
 features never use a rating published after the game they predict (see app.features.defenders).
 
-python -m app.ingest.defense      store any missing past seasons and today's current-season snapshot
+python -m app.ingest.defense            store any missing past seasons and today's current-season snapshot
+python -m app.ingest.defense --reload   re-download every past season too
 """
 
 import logging
@@ -58,10 +59,12 @@ def missing_final_seasons() -> list[str]:
     return [x for x in seasons if x not in have and x < CURRENT_SEASON]
 
 
-def run(today: date | None = None) -> dict:
+def run(today: date | None = None, reload_past: bool = False) -> dict:
+    """Store missing past seasons (all of them with reload_past) and today's current-season snapshot."""
     today = today or today_et()
     result = {}
-    for season in missing_final_seasons():
+    past = sorted({previous_season(min(BACKFILL_SEASONS)), *BACKFILL_SEASONS} - {CURRENT_SEASON}) if reload_past else missing_final_seasons()
+    for season in past:
         n, unmatched = load_season(season, season_end(season))
         result[season] = (n, unmatched)
     result[CURRENT_SEASON] = load_season(CURRENT_SEASON, today)
@@ -73,5 +76,5 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     init_db()
-    for season, (n, unmatched) in run().items():
+    for season, (n, unmatched) in run(reload_past="--reload" in sys.argv).items():
         print(f"{season}: {n} players stored, {len(unmatched)} unmatched {unmatched[:10]}")

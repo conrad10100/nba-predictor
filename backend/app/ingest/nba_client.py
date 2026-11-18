@@ -143,7 +143,8 @@ def bbref_defense(season: str) -> list[dict]:
     resp = _call(lambda: requests.get(BBREF_ADVANCED_URL.format(end_year=end_year), timeout=30,
                                       headers={"User-Agent": "Mozilla/5.0 (compatible; nba-predictor)"}))
     resp.raise_for_status()
-    return parse_bbref_advanced(resp.text)
+    # The page is UTF-8 but its headers don't say so, and requests would fall back to Latin-1 (Jokić -> JokiÄ\x87).
+    return parse_bbref_advanced(resp.content.decode("utf-8", errors="replace"))
 
 
 def parse_bbref_advanced(html: str) -> list[dict]:

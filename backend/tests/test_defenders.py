@@ -108,3 +108,21 @@ def test_basketball_reference_table_parsing():
         {"name": "Good Player", "slug": "goodpl01", "team": "BKN", "minutes": 1500.0, "dbpm": 2.1},
         {"name": "Traded Guy", "slug": "trade01", "team": "2TM", "minutes": 900.0, "dbpm": -0.4},
     ]
+
+
+def test_bbref_page_decoded_as_utf8(monkeypatch):
+    from app.ingest import nba_client
+
+    html = ('<table id="advanced"><tbody><tr><td data-append-csv="jokicni01" data-stat="name_display">Nikola Jokić</td>'
+            '<td data-stat="team_name_abbr">DEN</td><td data-stat="mp">2500</td><td data-stat="dbpm">1.5</td></tr></tbody></table>')
+
+    class Resp:
+        content, encoding, text = html.encode("utf-8"), "ISO-8859-1", html.encode("utf-8").decode("latin-1")
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(nba_client.requests, "get", lambda *a, **k: Resp())
+    monkeypatch.setattr(nba_client, "REQUEST_GAP_S", 0)
+    assert nba_client.bbref_defense("2025-26")[0]["name"] == "Nikola Jokić"
+    assert nba_client.normalize_name("Nikola Jokić") == "nikola jokic"
