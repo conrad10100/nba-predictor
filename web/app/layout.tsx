@@ -42,6 +42,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <Link href="/model" className="text-sm text-text-2 hover:text-text">
               Model
             </Link>
+            <Link href="/ab-test" className="text-sm text-text-2 hover:text-text">
+              A/B test
+            </Link>
           </nav>
         </header>
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">{children}</main>
