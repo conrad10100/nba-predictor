@@ -220,3 +220,22 @@ class ModelConfig(Base):
     bias_correction: Mapped[float] = mapped_column(Float, default=0.0)  # added to raw predictions
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Manual controls (python -m app.ml.modelctl). Settings in locked_params override the self-tuned champion and are
+    # never changed by a challenger; pinned_version makes predictions use that stored model instead of the newest.
+    locked_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    pinned_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class DefenderRating(Base):
+    """A player's defensive rating from Basketball-Reference (DBPM), as published on `as_of`.
+
+    Past seasons are stored once as final ratings (as_of = the July 1 after the season); the current season gets a
+    snapshot each day, so features only ever use a rating that was published before the game.
+    """
+
+    __tablename__ = "defender_ratings"
+    player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[str] = mapped_column(String(7), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date, primary_key=True)
+    dbpm: Mapped[float] = mapped_column(Float)  # defensive box plus/minus: points per 100 possessions vs. average, + is better
+    minutes: Mapped[float] = mapped_column(Float)

@@ -19,6 +19,7 @@ from app.ingest.load import (
     dates_missing_props, load_espn_logs, load_game_lines, load_injuries, load_player_props, load_players, load_schedule,
     load_season_logs,
 )
+from app.ingest import defense
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
@@ -53,6 +54,13 @@ def run(refresh_only: bool = False) -> bool:
         ingest_ok = _ingest(today)
 
     if not refresh_only:
+        # Defensive ratings (Basketball-Reference DBPM): today's snapshot, plus any past season not stored yet.
+        # Only feeds the defender features, so a failure here never stops the run.
+        try:
+            for season, (n, unmatched) in defense.run(today).items():
+                log.info("defender ratings %s: %d stored, %d unmatched %s", season, n, len(unmatched), unmatched[:10])
+        except Exception:
+            log.exception("defender ratings: failed, continuing without new ones")
         with engine.begin() as conn:
             log.info("filled actuals on %d predictions", conn.execute(FILL_ACTUALS).rowcount)
         for e in evaluate_pending(today):

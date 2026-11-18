@@ -170,6 +170,7 @@ def _configs() -> list[dict]:
     with SessionLocal() as s:
         return [
             {"target": c.target, "params": c.params, "bias_correction": c.bias_correction, "note": c.note,
+             "locked_params": c.locked_params, "pinned_version": c.pinned_version,
              "updated_at": c.updated_at.isoformat() if c.updated_at else None}
             for c in s.scalars(select(ModelConfig))
         ]

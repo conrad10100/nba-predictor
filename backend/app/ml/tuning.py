@@ -12,7 +12,10 @@ from app.ml import xgb
 from app.models import ModelConfig
 
 DEFAULT = {"model": "hgb", "half_life_days": 365, "learning_rate": 0.08, "max_leaf_nodes": 31, "min_samples_leaf": 40, "l2_regularization": 1.0,
-           "minutes_weight": 0}
+           "minutes_weight": 0,
+           # Opponent defender features (who guards the player, how good tonight's defenders are). Off by default so the
+           # existing model stays champion until the version with them wins on recent games.
+           "defender_features": 0}
 
 # Variations around the default, one knob at a time; cycled through one per day.
 CANDIDATES = [
@@ -23,27 +26,46 @@ CANDIDATES = [
     {"learning_rate": 0.04}, {"l2_regularization": 5.0},
     {"model": "hgb"}, {"model": "xgboost"},  # algorithm itself competes too (XGBoost only where it's installed)
 ]
+# Feature-set switches: each day the champion also faces itself with each switch flipped (on top of the rotating
+# challenger), so a feature set takes over as soon as it wins on recent games and gives way as soon as it loses.
+FEATURE_SWITCHES = ["defender_features"]
 MIN_IMPROVEMENT = 0.005  # challenger must cut holdout MAE (on players with DraftKings lines) by 0.5%+
+
+
+def locked(target: str) -> dict:
+    """Settings fixed by hand (python -m app.ml.modelctl); self-tuning never changes these."""
+    with SessionLocal() as s:
+        cfg = s.get(ModelConfig, target)
+        return dict(cfg.locked_params or {}) if cfg else {}
 
 
 def champion(target: str) -> dict:
     with SessionLocal() as s:
         cfg = s.get(ModelConfig, target)
-    params = {**DEFAULT, **cfg.params} if cfg else dict(DEFAULT)
+        stored = dict(cfg.params) if cfg else {}
+        fixed = dict(cfg.locked_params or {}) if cfg else {}
+    params = {**DEFAULT, **stored, **fixed}
     if params["model"] == "xgboost" and not xgb.AVAILABLE:
         params["model"] = "hgb"  # e.g. running locally on a Mac without libomp
     return params
 
 
 def challenger(target: str, current: dict, on: date) -> dict:
-    """Next candidate in the daily rotation that actually differs from the champion."""
-    candidates = [c for c in CANDIDATES if xgb.AVAILABLE or c.get("model") != "xgboost"]
-    start = on.toordinal() % len(candidates)
+    """Next candidate in the daily rotation that actually differs from the champion (never touching locked settings)."""
+    fixed = locked(target)
+    candidates = [c for c in CANDIDATES if (xgb.AVAILABLE or c.get("model") != "xgboost") and not set(c) & set(fixed)]
+    start = on.toordinal() % max(len(candidates), 1)
     for i in range(len(candidates)):
         cand = {**current, **candidates[(start + i) % len(candidates)]}
         if cand != current:
             return cand
     return current
+
+
+def feature_challengers(target: str, current: dict) -> list[dict]:
+    """The champion with each feature switch flipped, except switches locked by hand."""
+    fixed = locked(target)
+    return [{**current, key: 0 if current.get(key) else 1} for key in FEATURE_SWITCHES if key not in fixed]
 
 
 def bias_correction(target: str) -> float:

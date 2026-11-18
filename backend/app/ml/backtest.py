@@ -30,12 +30,12 @@ from app.models import Prediction
 VERSION_PREFIX = "backtest-"
 
 
-def _fit_week(history: pd.DataFrame, target: str) -> tuple[object, dict, list[str]]:
+def _fit_week(history: pd.DataFrame, target: str, params: dict | None = None) -> tuple[object, dict, list[str]]:
     """Same recipe as the daily retrain: early-stopped fit, range calibration on the last 3 weeks, full refit."""
-    params = tuning.champion(target)
+    params = params or tuning.champion(target)
     cutoff = history["date"].max() - pd.Timedelta(days=HOLDOUT_DAYS)
     train, hold = history[history["date"] <= cutoff], history[history["date"] > cutoff]
-    feats = usable_features(train)
+    feats = usable_features(train, params)
     probe = _model(params).fit(train[feats], train[target], sample_weight=_weights(train, params))
     cal = intervals.fit(hold, target, probe.predict(hold[feats]))
     final = _model(params, int(probe.n_iter_ * 1.1), early_stop=False).fit(

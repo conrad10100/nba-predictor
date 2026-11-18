@@ -23,13 +23,15 @@ Tests: `cd backend && .venv/bin/python -m pytest`. They check that no feature ca
 
 ## Daily pipeline (`python -m jobs.daily`)
 
-1. Pull the last 3 days of box scores (picks up stat corrections), rosters, schedule and the injury report
+1. Pull the last 3 days of box scores (picks up stat corrections), rosters, schedule and the injury report, plus
+   today's player defensive ratings (DBPM) from Basketball-Reference (one page; past seasons once)
 2. Fill in actual stats on yesterday's stored predictions
 3. **Evaluate** each graded date: average miss, bias, % within ±3 pts / ±2 reb / ±2 ast, range hit rate, whether the
    model beat the last-10 average, broken down by B2B, conference, home/away, starters, teammate out, injury listed
 4. **Self-tune**: update the bias correction from the last 14 days of live misses; train today's challenger
-   setting (recency half-life, tree size, learning rate, or XGBoost vs HistGradientBoosting) against the
-   champion on the last 3 weeks, and keep whichever is more accurate
+   setting (recency half-life, tree size, learning rate, or XGBoost vs HistGradientBoosting), and the champion with
+   the defender features flipped on/off, against the champion on the last 3 weeks, and keep whichever is more
+   accurate (a challenger must win by 0.5%+)
 5. Retrain on all history and predict today's games; store the predictions for tomorrow's evaluation
 
 Each run also stores DraftKings points/rebounds/assists player prop lines from ESPN (`player_props`): today's lines
@@ -55,9 +57,31 @@ FT and 3PA rate allowed, turnovers forced, missed shots (rebound chances), offen
 to the player's position; both teams' pace and the projected game pace; net-rating gap (blowout risk);
 head-to-head history of the two teams.
 
+Defenders (on only while they win the daily comparison; see below): each player's defensive box plus/minus (DBPM)
+from Basketball-Reference, as published before the game (this season's snapshot so far blended with last season's
+final). Features: tonight's opposing players weighted by minutes, the same for the player's position, tonight vs.
+the opponent's usual lineup (a good defender out), and the opponent's top-minutes player at the same position (the
+likeliest primary defender). Who-guarded-whom tracking only exists on stats.nba.com, which blocks Railway.
+
 Context: home/away, rest days, back-to-back, 3 games in 4 nights, road-trip length, opponent rest and B2B,
 rest advantage, same conference / division, game number in the season, and production missing from injured
 rotation teammates.
+
+## Model versions and reverting
+
+Every retrain is saved in `nba.model_runs` (one row per version and stat: accuracy, settings, the features it uses
+in `feature_importance`, and the model itself in `artifact`). Predictions use the newest promoted model unless one
+is pinned.
+
+```bash
+python -m app.ml.modelctl status                  # what each stat is predicting with right now
+python -m app.ml.modelctl list [pts]              # recent saved models and their accuracy
+python -m app.ml.modelctl pin 20261117-1002 [pts] # predict with that saved model until unpinned
+python -m app.ml.modelctl unpin [pts]
+python -m app.ml.modelctl features on|off|auto    # force the defender features, or let the daily comparison decide
+python -m app.ingest.defense                      # store defensive ratings now (past seasons + today's snapshot)
+python -m app.ml.compare [weeks]                  # walk-forward MAE with vs. without the defender features
+```
 
 ## Deployment
 
