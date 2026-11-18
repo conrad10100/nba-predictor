@@ -132,6 +132,14 @@ def player(player_id: int, games: int = 25):
     }
 
 
+@app.get("/api/ab-test")
+def ab_test():
+    """Shadow test (A/B) of feature sets: live model vs. the shadow, this week and past weekly verdicts."""
+    from app.ml import shadow
+
+    return shadow.report(today_et())
+
+
 @app.get("/api/model/metrics")
 def metrics():
     with SessionLocal() as s:

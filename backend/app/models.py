@@ -269,3 +269,16 @@ class ShadowPrediction(Base):
     params: Mapped[dict] = mapped_column(JSON)  # e.g. {"defender_features": 1}: what differs from the live model
     predicted: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ShadowVerdict(Base):
+    """One weekly shadow-test result per stat (app.ml.shadow), for the A/B test page."""
+
+    __tablename__ = "shadow_verdicts"
+    target: Mapped[str] = mapped_column(String(4), primary_key=True)
+    decided_on: Mapped[date] = mapped_column(Date, primary_key=True)
+    start: Mapped[date] = mapped_column(Date)
+    end: Mapped[date] = mapped_column(Date)  # last game date included
+    shadow_params: Mapped[dict] = mapped_column(JSON)
+    switched: Mapped[bool] = mapped_column(Boolean)
+    metrics: Mapped[dict] = mapped_column(JSON)  # compare() output

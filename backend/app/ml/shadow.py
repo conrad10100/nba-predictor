@@ -26,7 +26,7 @@ from app.config import TARGETS
 from app.db import SessionLocal, engine, upsert
 from app.ml import tuning
 from app.ml.registry import _load_bytes
-from app.models import ModelConfig, PlayerProp, Prediction, ShadowModel, ShadowPrediction
+from app.models import ModelConfig, PlayerProp, Prediction, ShadowModel, ShadowPrediction, ShadowVerdict
 
 WEEK_DAYS = 7
 MIN_LINE_PREDICTIONS = 150  # need this many graded predictions with DraftKings lines before deciding
@@ -64,7 +64,7 @@ def save_predictions(rows: pd.DataFrame, on: date, targets: list[str]) -> int:
 def compare(target: str, start: date, end: date) -> dict:
     """Live vs shadow on graded games with start <= date < end (only player-games both predicted)."""
     q = (
-        select(Prediction.predicted.label("live"), ShadowPrediction.predicted.label("shadow"), Prediction.actual,
+        select(Prediction.game_date, Prediction.predicted.label("live"), ShadowPrediction.predicted.label("shadow"), Prediction.actual,
                PlayerProp.line, ShadowPrediction.params)
         .join(ShadowPrediction, (ShadowPrediction.player_id == Prediction.player_id) & (ShadowPrediction.game_id == Prediction.game_id)
               & (ShadowPrediction.target == Prediction.target))
@@ -86,6 +86,12 @@ def compare(target: str, start: date, end: date) -> dict:
         if len(lines):
             out[f"{who}_mae_lines"] = float((lines[who] - lines["actual"]).abs().mean())
             out[f"{who}_hit_rate"] = _hit_rate(lines[who], lines["line"], lines["actual"])
+    days = []
+    for d, g in lines.groupby("game_date"):
+        days.append({"date": pd.Timestamp(d).date().isoformat(), "n_lines": len(g),
+                     "live_mae_lines": float((g["live"] - g["actual"]).abs().mean()),
+                     "shadow_mae_lines": float((g["shadow"] - g["actual"]).abs().mean())})
+    out["days"] = days
     return out
 
 
@@ -129,6 +135,8 @@ def weekly_decision(today: date) -> list[str]:
         verdict = "shadow wins, switching to it" if won else "live model kept"
         note = f"{describe(r)} -> {verdict}"
         with SessionLocal() as s:
+            s.merge(ShadowVerdict(target=target, decided_on=today, start=since, end=today - timedelta(days=1),
+                                  shadow_params=r.get("shadow_params", {}), switched=won, metrics=r))
             cfg = s.get(ModelConfig, target)
             cfg.shadow_since, cfg.shadow_note = None, note[:512]  # the next shadow slate starts a new week
             if won:  # the old shadow is now the live setup; today's retrain makes the new (flipped) shadow
@@ -136,6 +144,34 @@ def weekly_decision(today: date) -> list[str]:
             s.commit()
         notes.append(note)
     return notes
+
+
+def report(today: date) -> dict:
+    """Everything the A/B test page shows: per stat, the running week and past verdicts."""
+    out = {}
+    with SessionLocal() as s:
+        for target in TARGETS:
+            cfg = s.get(ModelConfig, target)
+            sm = s.get(ShadowModel, target)
+            champ = tuning.champion(target)
+            locked = set(tuning.locked(target))
+            since = cfg.shadow_since if cfg else None
+            verdicts = s.scalars(select(ShadowVerdict).where(ShadowVerdict.target == target).order_by(ShadowVerdict.decided_on.desc())).all()
+            out[target] = {
+                "live_params": {k: champ.get(k, 0) for k in tuning.FEATURE_SWITCHES},
+                "shadow_params": {k: v for k, v in (sm.params if sm else {}).items() if k in tuning.FEATURE_SWITCHES},
+                "locked": sorted(locked & set(tuning.FEATURE_SWITCHES)),
+                "since": since.isoformat() if since else None,
+                "decides_on": (since + timedelta(days=WEEK_DAYS)).isoformat() if since else None,
+                "week": compare(target, since, today + timedelta(days=1)) if since else None,
+                "verdicts": [{"decided_on": v.decided_on.isoformat(), "start": v.start.isoformat(), "end": v.end.isoformat(),
+                              "shadow_params": v.shadow_params, "switched": v.switched,
+                              **{k: v.metrics.get(k) for k in ("n", "n_lines", "live_mae_lines", "shadow_mae_lines",
+                                                                "live_hit_rate", "shadow_hit_rate", "live_mae", "shadow_mae")}}
+                             for v in verdicts],
+            }
+    return {"min_improvement": tuning.MIN_IMPROVEMENT, "min_line_predictions": MIN_LINE_PREDICTIONS, "week_days": WEEK_DAYS,
+            "stats": out}
 
 
 def main(targets: list[str]) -> None:

@@ -163,6 +163,25 @@ export type Performance = {
   picks: Pick[];
 };
 
+export type AbDay = { date: string; n_lines: number; live_mae_lines: number; shadow_mae_lines: number };
+export type AbResult = {
+  n: number; n_lines: number; live_mae_lines?: number; shadow_mae_lines?: number; live_hit_rate?: number | null;
+  shadow_hit_rate?: number | null; live_mae?: number; shadow_mae?: number;
+};
+export type AbVerdict = AbResult & {
+  decided_on: string; start: string; end: string; shadow_params: Record<string, number>; switched: boolean;
+};
+export type AbStat = {
+  live_params: Record<string, number>;
+  shadow_params: Record<string, number>;
+  locked: string[];
+  since: string | null;
+  decides_on: string | null;
+  week: (AbResult & { start: string; end: string; days?: AbDay[] }) | null;
+  verdicts: AbVerdict[];
+};
+export type AbTest = { min_improvement: number; min_line_predictions: number; week_days: number; stats: Partial<Record<Target, AbStat>> };
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, { cache: "no-store", ...init });
   if (!res.ok) {
@@ -179,6 +198,7 @@ export const api = {
     request<Slate>("/api/slate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, ...o }) }),
   player: (id: string) => request<PlayerDetail>(`/api/players/${id}`),
   metrics: () => request<ModelMetrics>("/api/model/metrics"),
+  abTest: () => request<AbTest>("/api/ab-test"),
   evaluation: () => request<{ days: DayEval[]; totals: Record<"live" | "backtest", Partial<EvalTotals>> }>("/api/evaluation"),
   evaluationDay: (date: string) => request<GradedPlayer[]>(`/api/evaluation/${date}`),
   performance: (kind: Kind, phase: Phase) => request<Performance>(`/api/performance?kind=${kind}&phase=${phase}`),
