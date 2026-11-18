@@ -128,13 +128,33 @@ def _ingest(today) -> bool:
 LATE_TIP_GRACE = timedelta(minutes=20)  # a game still "pre" this long after its scheduled tip counts as starting now
 
 
-def _tipping_soon(today, within: timedelta, now: datetime | None = None) -> list[dict]:
-    """Today's games that haven't started and are scheduled to tip off within `within` (or are a little late)."""
-    from app.ingest import nba_client
-
+def _tipping_soon(tipoffs: list[dict], within: timedelta, now: datetime | None = None) -> list[dict]:
+    """Games that haven't started and are scheduled to tip off within `within` (or are a little late)."""
     now = now or datetime.now(timezone.utc)
-    return [g for g in nba_client.espn_tipoffs(today)
-            if g["state"] == "pre" and -LATE_TIP_GRACE <= g["start"] - now <= within]
+    return [g for g in tipoffs if g["state"] == "pre" and -LATE_TIP_GRACE <= g["start"] - now <= within]
+
+
+def _lock_started(today, tipoffs: list[dict]) -> None:
+    """Settle the top 5 for games that have tipped off since the last run (app.ml.top5). Runs before this run
+    re-freezes any pick, so it sees the board as it stood at their tip-off. Never stops the refresh."""
+    started = [g for g in tipoffs if g["state"] != "pre"]
+    if not started:
+        return
+    try:
+        from app.ml import top5
+        from app.models import Team
+
+        init_db()
+        with engine.connect() as conn:
+            abbr_to_id = dict(conn.execute(select(Team.abbr, Team.id)).all())
+            by_matchup = {(h, a): gid for gid, h, a in conn.execute(
+                select(Game.id, Game.home_team_id, Game.away_team_id).where(Game.date == today)).all()}
+        ids = {by_matchup.get((abbr_to_id.get(g["home"]), abbr_to_id.get(g["away"]))) for g in started} - {None}
+        n_games, n_picks = top5.lock_started(today, ids)
+        if n_games:
+            log.info("top 5 settled at tip-off: %d games just started, %d of their picks locked in", n_games, n_picks)
+    except Exception:
+        log.exception("top 5 lock: failed, continuing")
 
 
 def _missing_last_night(today) -> bool:
@@ -152,10 +172,15 @@ if __name__ == "__main__":
     parser.add_argument("--before-tip", type=int, metavar="MINUTES",
                         help="with --refresh: only run if a game tips off within this many minutes")
     args = parser.parse_args()
+    if args.before_tip is not None and not args.refresh:
+        parser.error("--before-tip needs --refresh")
+    if args.refresh:
+        from app.ingest import nba_client
+
+        tipoffs = nba_client.espn_tipoffs(today_et())
+        _lock_started(today_et(), tipoffs)
     if args.before_tip is not None:
-        if not args.refresh:
-            parser.error("--before-tip needs --refresh")
-        soon = _tipping_soon(today_et(), timedelta(minutes=args.before_tip))
+        soon = _tipping_soon(tipoffs, timedelta(minutes=args.before_tip))
         if not soon:
             log.info("no game tips off in the next %d minutes; nothing to refresh", args.before_tip)
             sys.exit(0)

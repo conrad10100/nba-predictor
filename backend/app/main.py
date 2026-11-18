@@ -25,8 +25,12 @@ from app.db import SessionLocal
 from app.features.build import Frames, load_frames
 from app.init_db import init_db
 from app.ml.backtest import VERSION_PREFIX as BACKTEST_PREFIX
+from app.ml import top5
 from app.ml.predict import Overrides, predict_slate
-from app.models import DailyEvaluation, Game, ModelConfig, ModelRun, PickSnapshot, Player, PlayerGameStat, PlayerProp, Prediction, Team
+from app.models import (
+    DailyEvaluation, Game, LockedGame, ModelConfig, ModelRun, PickSnapshot, Player, PlayerGameStat, PlayerProp, Prediction, Team,
+    Top5Lock,
+)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -274,7 +278,7 @@ RAW_COLUMNS = ["date", "game_id", "player_id", "player", "team_id", "team", "hom
                "open_line", "over_odds", "under_odds", "predicted", "p10", "p90", "actual", "model_version"]
 
 
-def _load(source, phase: str | None = None) -> pd.DataFrame:
+def _load(source, phase: str | None = None, on: date | None = None) -> pd.DataFrame:
     """Prediction + line rows. `source` is PlayerProp (the current/closing lines with the stored predictions) or
     PickSnapshot (both frozen before tip-off, for one `phase`)."""
     team, home, away = aliased(Team), aliased(Team), aliased(Team)
@@ -293,6 +297,8 @@ def _load(source, phase: str | None = None) -> pd.DataFrame:
     )
     if phase is not None:
         q = q.where(source.phase == phase)
+    if on is not None:
+        q = q.where(Prediction.game_date == on)
     with SessionLocal() as s:
         return pd.DataFrame(s.execute(q).all(), columns=RAW_COLUMNS)
 
@@ -342,8 +348,9 @@ def _grade(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _rank(df: pd.DataFrame) -> pd.DataFrame:
-    """Each night's top 5 player-points picks, by confidence and by biggest gap from the line (confidence breaks ties)."""
+def _rank(df: pd.DataFrame, locks: top5.Locks | None = None) -> pd.DataFrame:
+    """Each night's top 5 player-points picks, by confidence and by biggest gap from the line (confidence breaks ties).
+    With `locks` (the final picks), nights whose early games have tipped keep the picks settled then (app.ml.top5)."""
     df = df.copy()
     points = df["pick"].notna() & (df["stat"] == TOP_STAT)
     df["confidence_rank"] = df[points].groupby(["kind", "date"])["prob"].rank(ascending=False, method="first")
@@ -351,7 +358,7 @@ def _rank(df: pd.DataFrame) -> pd.DataFrame:
     gap_key = df["edge"].abs() + df["prob"].fillna(0) / 1000
     df["gap_rank"] = gap_key[points].groupby([df["kind"], df["date"]]).rank(ascending=False, method="first")
     df["top5_gap"] = df["gap_rank"] <= TOP_N
-    return df
+    return top5.apply(df, locks, TOP_N) if locks and locks.games else df
 
 
 # The grading below reads every prediction, line and snapshot and takes a couple of seconds, but the inputs only
@@ -377,6 +384,7 @@ def _fingerprint() -> tuple:
     sources = (Prediction, PlayerProp, PickSnapshot)
     cols = [select(c).select_from(src).scalar_subquery() for src, cs in zip(sources, parts) for c in cs]
     cols.append(select(func.count()).select_from(Game).where(Game.status == "final").scalar_subquery())
+    cols += [select(func.count()).select_from(t).scalar_subquery() for t in (LockedGame, Top5Lock)]  # top 5 settled at tip-off
     with SessionLocal() as s:
         return tuple(s.execute(select(*cols)).one())
 
@@ -424,8 +432,9 @@ def _view(allp: pd.DataFrame, kind: str, phase: str) -> pd.DataFrame:
     """The picks a Performance page grades, with each night's top 5 ranked.
 
     Live nights: only picks frozen before tip-off (pick_snapshots) for the page's phase: "morning" (the morning run,
-    before the evening injury update) or "final" (after the evening injury update). Nothing about them changes once
-    games start, and lines first seen after the games never count. Backtest nights are historical and graded on the
+    before the injury updates) or "final" (the last injury update before each game's tip-off). Nothing about them changes
+    once games start, and lines first seen after the games never count. On the final page a night's top 5 is settled
+    game by game as they tip off (app.ml.top5), so a later game can't push out a pick that was in it at tip-off. Backtest nights are historical and graded on the
     stored lines (the same on both pages).
     """
     if kind == "backtest":
@@ -436,7 +445,8 @@ def _view(allp: pd.DataFrame, kind: str, phase: str) -> pd.DataFrame:
         df = df[df["kind"] == "live"]
     if df.empty:
         return pd.DataFrame(columns=PICK_COLUMNS)
-    return _rank(df)[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
+    locks = top5.load() if kind == "live" and phase == "final" else None
+    return _rank(df, locks)[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
 
 
 def _record(g: pd.DataFrame) -> dict:

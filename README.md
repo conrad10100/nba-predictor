@@ -49,6 +49,12 @@ scoreboard) and otherwise exits in a few seconds, so running it every 15 minutes
 15 to 30 minutes before its own tip-off: a 7:30 game uses the injury report as of about 7:15, a 10:30 game as of
 about 10:15. Games that already started are never re-frozen.
 
+On the **After injuries** page a night's top 5 is settled game by game as they tip off: each refresh run first
+checks which games have started since the last run, and their picks that were in the top 5 at that moment are
+locked in (`top5_locks`; their other picks drop out, `locked_games`). Later games only compete for the slots still
+open, so a 9:45 injury can't push out a pick that was in the top 5 when its 7:00 game started. The morning page is
+frozen all at once and ranks the whole night.
+
 ## Features
 
 Player: last 5 / last 10 / season / recency-weighted averages of PTS, REB, AST, minutes, FGA, FTA, 3PA, usage;
