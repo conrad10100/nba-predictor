@@ -27,6 +27,10 @@ def active_version(target: str) -> str | None:
         )
 
 
+def _load_bytes(artifact: bytes) -> dict:
+    return joblib.load(io.BytesIO(artifact))
+
+
 @lru_cache(maxsize=8)
 def _load(version: str, target: str) -> dict:
     with SessionLocal() as s:
