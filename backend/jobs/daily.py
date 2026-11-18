@@ -1,13 +1,16 @@
 """Daily pipeline. Run by Railway cron.
 
 python -m jobs.daily            full run: ingest -> actuals -> evaluate yesterday -> self-tune + retrain -> predict today
-python -m jobs.daily --refresh  evening (6pm ET) injury update: refresh injuries + lines and re-predict today (no retrain)
+python -m jobs.daily --refresh  injury update: refresh injuries + lines and re-predict today (no retrain)
+python -m jobs.daily --refresh --before-tip 30
+                                the same, but only if a game tips off within 30 minutes (else exit right away), so a
+                                frequent cron gives every game a final pick taken shortly before its own tip-off
 """
 
 import argparse
 import logging
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text
 
@@ -47,8 +50,8 @@ def run(refresh_only: bool = False) -> bool:
     today = today_et()
     init_db()
     # stats.nba.com sometimes times out or blocks cloud IPs. Don't lose the whole day to it: still store injuries,
-    # lines and props and predict today's slate with the current models, then report the failure. The 5pm refresh
-    # tries the download again if last night's games are still missing.
+    # lines and props and predict today's slate with the current models, then report the failure. The evening refreshes
+    # try the download again if last night's games are still missing.
     ingest_ok = True
     if not refresh_only or _missing_last_night(today):
         ingest_ok = _ingest(today)
@@ -122,6 +125,18 @@ def _ingest(today) -> bool:
     return True
 
 
+LATE_TIP_GRACE = timedelta(minutes=20)  # a game still "pre" this long after its scheduled tip counts as starting now
+
+
+def _tipping_soon(today, within: timedelta, now: datetime | None = None) -> list[dict]:
+    """Today's games that haven't started and are scheduled to tip off within `within` (or are a little late)."""
+    from app.ingest import nba_client
+
+    now = now or datetime.now(timezone.utc)
+    return [g for g in nba_client.espn_tipoffs(today)
+            if g["state"] == "pre" and -LATE_TIP_GRACE <= g["start"] - now <= within]
+
+
 def _missing_last_night(today) -> bool:
     """True if yesterday had games that aren't loaded as final yet."""
     with engine.connect() as conn:
@@ -134,5 +149,16 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh", action="store_true", help="injury refresh + re-predict only")
-    if not run(parser.parse_args().refresh):
+    parser.add_argument("--before-tip", type=int, metavar="MINUTES",
+                        help="with --refresh: only run if a game tips off within this many minutes")
+    args = parser.parse_args()
+    if args.before_tip is not None:
+        if not args.refresh:
+            parser.error("--before-tip needs --refresh")
+        soon = _tipping_soon(today_et(), timedelta(minutes=args.before_tip))
+        if not soon:
+            log.info("no game tips off in the next %d minutes; nothing to refresh", args.before_tip)
+            sys.exit(0)
+        log.info("tipping off soon: %s", ", ".join(f"{g['away']}@{g['home']} {g['start']:%H:%M}Z" for g in soon))
+    if not run(args.refresh):
         sys.exit(1)  # so Railway still shows the run as failed

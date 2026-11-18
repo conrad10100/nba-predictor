@@ -3,7 +3,7 @@
 import re
 import time
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import requests
@@ -80,6 +80,24 @@ def espn_game_lines(on: date) -> list[dict]:
         out.append({"home": side["home"], "away": side["away"], "home_spread": home_spread,
                     "total": float(odds["overUnder"]), "provider": (odds.get("provider") or {}).get("name")})
     return out
+
+
+def espn_tipoffs(on: date) -> list[dict]:
+    """Each game on a date with its scheduled tip-off: [{home, away, state, start}]. `start` is a timezone-aware UTC
+    datetime, `state` ESPN's pre / in / post."""
+    data = _call(lambda: requests.get(ESPN_SCOREBOARD_URL, params={"dates": on.strftime("%Y%m%d")}, timeout=30).json())
+    out = []
+    for event in data.get("events", []):
+        comp = event["competitions"][0]
+        side = {t["homeAway"]: ESPN_TO_NBA_ABBR.get(t["team"]["abbreviation"], t["team"]["abbreviation"]) for t in comp["competitors"]}
+        out.append({"home": side["home"], "away": side["away"], "state": event["status"]["type"]["state"],
+                    "start": parse_espn_time(event["date"])})
+    return out
+
+
+def parse_espn_time(value: str) -> datetime:
+    """ESPN writes times like "2026-11-19T00:30Z" (no seconds), which older Pythons' fromisoformat rejects."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 ESPN_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
