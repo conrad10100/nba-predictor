@@ -11,7 +11,7 @@ from app.config import TARGETS as ACTIVE_TARGETS
 from app.db import SessionLocal, upsert
 from app.features.build import OUT_STATUSES, TARGETS, Frames, Upcoming, build_features
 from app.ml.registry import load_active
-from app.ml import intervals
+from app.ml import intervals, shadow
 from app.ml.tuning import bias_correction
 from app.models import Injury, Prediction
 
@@ -88,6 +88,7 @@ def predict_slate(fr: Frames, on: date, overrides: Overrides | None = None, pers
 
     if persist:
         _save(rows, version, on, injuries, predicted)
+        shadow.save_predictions(rows, on, predicted)  # week-long live test of the shadow model; never affects picks
     return _response(fr, games, rows, out, injuries, overrides, version, on)
 
 

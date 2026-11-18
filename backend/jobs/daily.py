@@ -23,6 +23,7 @@ from app.ingest import defense
 from app.init_db import init_db
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
+from app.ml.shadow import weekly_decision
 from app.ml.snapshots import snapshot_pregame
 from app.ml.train import train_all
 from app.models import Game
@@ -67,6 +68,12 @@ def run(refresh_only: bool = False) -> bool:
             log.info("eval %s %s: n=%d MAE %.2f bias %+.2f within %.0f: %.0f%%", e["game_date"], e["target"], e["n_players"],
                      e["mae"], e["bias"], e["close_threshold"], 100 * e["within_close_pct"])
         log.info("bias corrections: %s", update_bias_corrections(today))
+        # Weekly shadow verdict (before retraining, so a switch applies to today's model).
+        try:
+            for note in weekly_decision(today):
+                log.info("shadow test: %s", note)
+        except Exception:
+            log.exception("shadow test: weekly comparison failed")
 
     n_inj, unmatched = load_injuries(today)
     log.info("injuries: %d stored, %d unmatched %s", n_inj, len(unmatched), unmatched[:10])

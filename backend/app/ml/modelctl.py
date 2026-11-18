@@ -5,7 +5,8 @@ python -m app.ml.modelctl status                     what each stat is using rig
 python -m app.ml.modelctl pin <version> [target]     predict with this saved model (all stats unless one is named)
 python -m app.ml.modelctl unpin [target]             back to the newest promoted model
 python -m app.ml.modelctl features on|off|auto [target]
-    defender features: force on, force off, or let the daily champion/challenger decide (the default)
+    defender features: force on, force off, or let the weekly shadow test decide (the default)
+python -m app.ml.modelctl shadow [target]            the shadow test: last weekly verdict and this week so far
 
 Every daily retrain is kept in model_runs, so any version listed can be pinned. A pin holds until unpinned; the
 daily job keeps training (and self-tuning) in the background, so unpinning picks up the newest model immediately.
@@ -92,7 +93,8 @@ def features(mode: str, targets: list[str]) -> None:
                 cfg.params = {**(cfg.params or {}), SWITCH: int(mode == "on")}
             cfg.locked_params = fixed or None
         s.commit()
-    print(f"Defender features {mode} for {', '.join(targets)}; takes effect at the next retrain (python -m app.ml.train).")
+    print(f"Defender features {mode} for {', '.join(targets)}; takes effect at the next retrain (python -m app.ml.train)."
+          + (" The shadow test is paused while forced." if mode != "auto" else ""))
 
 
 def main(argv: list[str]) -> None:
@@ -108,6 +110,10 @@ def main(argv: list[str]) -> None:
         pin(args[0], args[1:2] or TARGETS)
     elif cmd == "unpin":
         unpin(args[:1] or TARGETS)
+    elif cmd == "shadow":
+        from app.ml import shadow
+
+        shadow.main(args[:1] or TARGETS)
     elif cmd == "features" and args:
         features(args[0], args[1:2] or TARGETS)
     else:

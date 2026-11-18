@@ -18,7 +18,7 @@ from app.features.build import DEFENDER_FEATURES, FEATURES, build_features, load
 from app.ml import intervals, tuning
 from app.ml.registry import dump
 from app.ml.xgb import XGBModel
-from app.models import ModelRun, PlayerProp
+from app.models import ModelRun, PlayerProp, ShadowModel
 
 HOLDOUT_DAYS = 21
 MAX_ITER = 800
@@ -90,13 +90,12 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
     cutoff = rows["date"].max() - pd.Timedelta(days=HOLDOUT_DAYS)
     train, hold = rows[rows["date"] <= cutoff], rows[rows["date"] > cutoff]
 
-    # 1) Champion vs today's challengers on the most recent weeks, trained only on what came before them, judged on
-    #    the players the bets are on: the rotating hyperparameter challenger, plus the champion with each feature set
-    #    (e.g. defender ratings) flipped. A challenger must beat the champion by MIN_IMPROVEMENT to take over.
+    # 1) Champion vs today's hyperparameter challenger on the most recent weeks, trained only on what came before
+    #    them, judged on the players the bets are on. A challenger must beat the champion by MIN_IMPROVEMENT to take
+    #    over. Feature sets (e.g. defender ratings) don't compete here: they're shadow-tested on live slates instead.
     focus, focus_label = _focus(hold)
     champ = tuning.champion(target)
-    challengers = [tuning.challenger(target, champ, today_et()), *tuning.feature_challengers(target, champ)]
-    challengers = [c for i, c in enumerate(challengers) if c != champ and c not in challengers[:i]]
+    challengers = [c for c in [tuning.challenger(target, champ, today_et())] if c != champ]
     champ_focus, champ_mae, champ_model = _score(champ, train, hold, target, focus)
     judged = f"MAE on {focus_label} (n={int(focus.sum())})"
     params, point, mae, best_focus = champ, champ_model, champ_mae, champ_focus
@@ -145,7 +144,30 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
         "params": params, "tuning_note": note, "feature_importance": importance, "artifact": dump(bundle),
     }
     upsert(ModelRun.__table__, [run])
+    _train_shadow(rows, train, target, version, params, cal)
     return run
+
+
+def _train_shadow(rows: pd.DataFrame, train: pd.DataFrame, target: str, version: str, params: dict, cal) -> None:
+    """Train today's shadow model (the champion with the feature switch flipped) with the same recipe, for the
+    week-long live comparison in app.ml.shadow. A failure here never affects the live model."""
+    shadow = tuning.shadow_params(target, params)
+    if shadow is None:  # switch locked by hand: no shadow test
+        with SessionLocal() as s:
+            s.query(ShadowModel).filter(ShadowModel.target == target).delete()
+            s.commit()
+        return
+    try:
+        feats = usable_features(train, shadow)
+        probe = _model(shadow).fit(train[feats], train[target], sample_weight=_weights(train, shadow))
+        model = _model(shadow, int(probe.n_iter_ * 1.1), early_stop=False).fit(
+            rows[feats], rows[target], sample_weight=_weights(rows, shadow)
+        )
+        bundle = {"features": feats, "params": shadow, "interval": cal, "point": model}
+        upsert(ShadowModel.__table__, [{"target": target, "version": f"{version}-shadow", "params": shadow,
+                                        "trained_at": datetime.now(timezone.utc).replace(tzinfo=None), "artifact": dump(bundle)}])
+    except Exception as e:  # noqa: BLE001
+        print(f"{target}: shadow model failed: {e!r}", flush=True)
 
 
 def _diff(a: dict, b: dict) -> str:

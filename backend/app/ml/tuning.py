@@ -26,8 +26,8 @@ CANDIDATES = [
     {"learning_rate": 0.04}, {"l2_regularization": 5.0},
     {"model": "hgb"}, {"model": "xgboost"},  # algorithm itself competes too (XGBoost only where it's installed)
 ]
-# Feature-set switches: each day the champion also faces itself with each switch flipped (on top of the rotating
-# challenger), so a feature set takes over as soon as it wins on recent games and gives way as soon as it loses.
+# Feature-set switches. These don't compete in the daily backtest: the champion with the switch flipped runs as a
+# shadow model on live slates and takes over only by winning a week of real results (app.ml.shadow).
 FEATURE_SWITCHES = ["defender_features"]
 MIN_IMPROVEMENT = 0.005  # challenger must cut holdout MAE (on players with DraftKings lines) by 0.5%+
 
@@ -62,10 +62,23 @@ def challenger(target: str, current: dict, on: date) -> dict:
     return current
 
 
-def feature_challengers(target: str, current: dict) -> list[dict]:
-    """The champion with each feature switch flipped, except switches locked by hand."""
-    fixed = locked(target)
-    return [{**current, key: 0 if current.get(key) else 1} for key in FEATURE_SWITCHES if key not in fixed]
+def shadow_params(target: str, current: dict) -> dict | None:
+    """The champion with the feature switch flipped, or None if the switch is locked by hand."""
+    key = FEATURE_SWITCHES[0]
+    if key in locked(target):
+        return None
+    return {**current, key: 0 if current.get(key) else 1}
+
+
+def set_switch(target: str, key: str, value: int, note: str) -> None:
+    """Flip a feature switch on the stored champion (the weekly shadow verdict)."""
+    with SessionLocal() as s:
+        cfg = s.get(ModelConfig, target)
+        if cfg is None:
+            s.add(ModelConfig(target=target, params={**DEFAULT, key: value}, bias_correction=0.0, note=note))
+        else:
+            cfg.params = {**(cfg.params or {}), key: value}
+        s.commit()
 
 
 def bias_correction(target: str) -> float:

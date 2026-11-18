@@ -224,6 +224,9 @@ class ModelConfig(Base):
     # never changed by a challenger; pinned_version makes predictions use that stored model instead of the newest.
     locked_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     pinned_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Shadow test (app.ml.shadow): when the current week's comparison started, and the last weekly verdict.
+    shadow_since: Mapped[date | None] = mapped_column(Date, nullable=True)
+    shadow_note: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class DefenderRating(Base):
@@ -239,3 +242,30 @@ class DefenderRating(Base):
     as_of: Mapped[date] = mapped_column(Date, primary_key=True)
     dbpm: Mapped[float] = mapped_column(Float)  # defensive box plus/minus: points per 100 possessions vs. average, + is better
     minutes: Mapped[float] = mapped_column(Float)
+
+
+class ShadowModel(Base):
+    """The current shadow model per stat: the champion with a feature switch flipped (app.ml.shadow). It predicts
+    every slate alongside the live model but never feeds picks; it takes over only by winning the weekly comparison."""
+
+    __tablename__ = "shadow_models"
+    target: Mapped[str] = mapped_column(String(4), primary_key=True)
+    version: Mapped[str] = mapped_column(String(32))
+    params: Mapped[dict] = mapped_column(JSON)
+    trained_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    artifact: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class ShadowPrediction(Base):
+    """What the shadow model predicted, stored like `predictions` (latest pre-game run wins) but kept apart so the
+    live pages and grading never see it."""
+
+    __tablename__ = "shadow_predictions"
+    player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    target: Mapped[str] = mapped_column(String(4), primary_key=True)
+    game_date: Mapped[date] = mapped_column(Date, index=True)
+    model_version: Mapped[str] = mapped_column(String(32))
+    params: Mapped[dict] = mapped_column(JSON)  # e.g. {"defender_features": 1}: what differs from the live model
+    predicted: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

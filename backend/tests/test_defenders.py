@@ -126,3 +126,12 @@ def test_bbref_page_decoded_as_utf8(monkeypatch):
     monkeypatch.setattr(nba_client, "REQUEST_GAP_S", 0)
     assert nba_client.bbref_defense("2025-26")[0]["name"] == "Nikola Jokić"
     assert nba_client.normalize_name("Nikola Jokić") == "nikola jokic"
+
+
+def test_shadow_hit_rate_skips_pushes_and_no_picks():
+    from app.ml.shadow import _hit_rate
+
+    pred = pd.Series([25.0, 15.0, 20.5, 25.0, 15.0])
+    line = pd.Series([20.5] * 5)
+    actual = pd.Series([30.0, 10.0, 30.0, 20.5, 25.0])  # over wins, under wins, no pick, push, under loses
+    assert _hit_rate(pred, line, actual) == pytest.approx(2 / 3)
