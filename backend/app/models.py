@@ -190,6 +190,28 @@ class PickSnapshot(Base):
     taken_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class LockedGame(Base):
+    """A game whose top-5 picks were settled at tip-off (app.ml.top5): once a game is here, its picks that were in
+    the night's top 5 at that moment are in `top5_locks`, and its other picks can no longer enter the top 5."""
+
+    __tablename__ = "locked_games"
+    game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    game_date: Mapped[date] = mapped_column(Date, index=True)
+    locked_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Top5Lock(Base):
+    """A pick that was in the night's top 5 (final phase) when its game tipped off, so it stays there for good."""
+
+    __tablename__ = "top5_locks"
+    game_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    method: Mapped[str] = mapped_column(String(12), primary_key=True)  # confidence | gap
+    player_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    game_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    target: Mapped[str] = mapped_column(String(4), primary_key=True)
+    locked_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class DailyEvaluation(Base):
     """How the pre-game predictions for one date did once the games were played."""
 

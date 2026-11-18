@@ -36,13 +36,23 @@ Tests: `cd backend && .venv/bin/python -m pytest`. They check that no feature ca
 Each run also stores DraftKings points/rebounds/assists player prop lines from ESPN (`player_props`): today's lines
 before tip-off, yesterday's closing lines, and any finished dates this season that have none yet (a one-time backfill).
 Each pre-game run also freezes every pick (line, prices, prediction) for games that haven't started
-(`pick_snapshots`): the morning run as the "morning" picks, the evening injury update as the final picks. The
+(`pick_snapshots`): the morning run as the "morning" picks, the last injury update before each game's tip-off as
+the final picks. The
 **Performance** page grades the morning picks and **After injuries** the final ones, so a pick can never change once
 its game starts. Each grades the prediction as an over/under pick against that line: over when the prediction is
 above the line, under when below; it wins when the player finishes on that side, and landing exactly on it is a push.
 
-`python -m jobs.daily --refresh` is the evening injury update: re-pulls the injury report and DraftKings lines and
-re-predicts (no retrain), shortly before most tip-offs.
+`python -m jobs.daily --refresh` is the injury update: re-pulls the injury report and DraftKings lines and
+re-predicts (no retrain). With `--before-tip 30` it only does so when a game tips off within 30 minutes (per ESPN's
+scoreboard) and otherwise exits in a few seconds, so running it every 15 minutes gives each game a final pick taken
+15 to 30 minutes before its own tip-off: a 7:30 game uses the injury report as of about 7:15, a 10:30 game as of
+about 10:15. Games that already started are never re-frozen.
+
+On the **After injuries** page a night's top 5 is settled game by game as they tip off: each refresh run first
+checks which games have started since the last run, and their picks that were in the top 5 at that moment are
+locked in (`top5_locks`; their other picks drop out, `locked_games`). Later games only compete for the slots still
+open, so a 9:45 injury can't push out a pick that was in the top 5 when its 7:00 game started. The morning page is
+frozen all at once and ranks the whole night.
 
 ## Features
 
@@ -105,7 +115,7 @@ Production runs entirely in the cloud; nothing depends on a laptop being on.
 |---|---|---|---|
 | api | `/backend` | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` | always on, healthcheck `/api/health` |
 | daily | `/backend` | `python -m jobs.daily` | `0 10 * * *` (10:00 UTC, about 5–6am ET) |
-| refresh | `/backend` | `python -m jobs.daily --refresh` | `0 23 * * *` (23:00 UTC: 6pm ET in winter, 7pm during daylight saving) |
+| refresh | `/backend` | `python -m jobs.daily --refresh --before-tip 30` | `*/15 15-23,0-5 * * *` (every 15 minutes, 10am–1am ET in winter; skips quickly when no game is about to tip) |
 | web | `/web` | `npm run start` | always on |
 
 Variables: backend services get `DATABASE_URL` and `CURRENT_SEASON`; api also gets `CORS_ORIGINS` (the web URL);
