@@ -34,6 +34,7 @@ from app.models import Game
 log = logging.getLogger("daily")
 
 RELOAD_DAYS = 3  # re-pull a few days back to pick up late stat corrections
+GAP_FILL_DAYS = 14  # how far back to look for played games the stats.nba.com log left out
 
 FILL_ACTUALS = text("""
 UPDATE predictions SET actual = (
@@ -56,6 +57,9 @@ def run(refresh_only: bool = False) -> bool:
     ingest_ok = True
     if not refresh_only or _missing_last_night(today):
         ingest_ok = _ingest(today)
+        # Right away, so an evening refresh that picks up a late game grades its picks too (not void till morning).
+        with engine.begin() as conn:
+            log.info("filled actuals on %d predictions", conn.execute(FILL_ACTUALS).rowcount)
 
     if not refresh_only:
         # Defensive ratings (Basketball-Reference DBPM): today's snapshot, plus any past season not stored yet.
@@ -65,8 +69,6 @@ def run(refresh_only: bool = False) -> bool:
                 log.info("defender ratings %s: %d stored, %d unmatched %s", season, n, len(unmatched), unmatched[:10])
         except Exception:
             log.exception("defender ratings: failed, continuing without new ones")
-        with engine.begin() as conn:
-            log.info("filled actuals on %d predictions", conn.execute(FILL_ACTUALS).rowcount)
         for e in evaluate_pending(today):
             log.info("eval %s %s: n=%d MAE %.2f bias %+.2f within %.0f: %.0f%%", e["game_date"], e["target"], e["n_players"],
                      e["mae"], e["bias"], e["close_threshold"], 100 * e["within_close_pct"])
@@ -112,6 +114,7 @@ def _ingest(today) -> bool:
     try:
         n_team, n_player = load_season_logs(CURRENT_SEASON, since=today - timedelta(days=RELOAD_DAYS))
         log.info("box scores: %d team-games, %d player-games", n_team, n_player)
+        _fill_gaps_from_espn(today)
     except Exception:
         log.exception("box scores: stats.nba.com failed; falling back to ESPN box scores")
         # Same host as the box scores, so don't wait out the same timeouts for rosters and the schedule
@@ -130,6 +133,24 @@ def _ingest(today) -> bool:
     except Exception:
         log.exception("rosters/schedule: stats.nba.com failed; keeping what's stored")
     return True
+
+
+def _fill_gaps_from_espn(today) -> None:
+    """stats.nba.com's game log sometimes leaves out a finished game for days (MIL@MIA on 2026-11-18, DEN@NOP on
+    2026-11-14), which leaves it "scheduled" and its picks pending. Load just those games from ESPN instead.
+    ESPN only returns completed games, so a postponed one simply stays scheduled."""
+    with engine.connect() as conn:
+        missing = conn.execute(select(Game.id, Game.date).where(
+            Game.season == CURRENT_SEASON, Game.status != "final",
+            Game.date < today, Game.date >= today - timedelta(days=GAP_FILL_DAYS))).all()
+    if not missing:
+        return
+    try:
+        n_team, n_player, unmatched = load_espn_logs(CURRENT_SEASON, sorted({d for _, d in missing}), only={g for g, _ in missing})
+        log.info("box scores (ESPN, %d games missing from stats.nba.com): %d team-games, %d player-games, %d unmatched %s",
+                 len(missing), n_team, n_player, len(unmatched), unmatched[:10])
+    except Exception:
+        log.exception("box scores: ESPN gap fill failed; those games stay pending until a later run")
 
 
 LATE_TIP_GRACE = timedelta(minutes=20)  # a game still "pre" this long after its scheduled tip counts as starting now
