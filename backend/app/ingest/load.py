@@ -51,7 +51,7 @@ def load_season_logs(season: str, since: date | None = None) -> tuple[int, int]:
     return _store_logs(season, teams, players)
 
 
-def load_espn_logs(season: str, dates: list[date]) -> tuple[int, int, list[str]]:
+def load_espn_logs(season: str, dates: list[date], only: set[str] | None = None) -> tuple[int, int, list[str]]:
     """Same as load_season_logs for the listed dates, but from ESPN box scores (for when stats.nba.com is unreachable).
 
     Games are matched to the stored schedule by date and teams, players to known players by name. A player we have
@@ -70,7 +70,7 @@ def load_espn_logs(season: str, dates: list[date]) -> tuple[int, int, list[str]]
         for box in nba_client.espn_box_scores(d):
             home, away = abbr_to_id.get(box["home"]), abbr_to_id.get(box["away"])
             game_id = games.get((d, home, away))
-            if game_id is None:
+            if game_id is None or (only is not None and game_id not in only):
                 continue
             team_min = 240 + 25 * (box["periods"] - 4)
             totals = {home: {"MIN": team_min}, away: {"MIN": team_min}}
