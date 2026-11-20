@@ -93,11 +93,12 @@ def run(refresh_only: bool = False) -> bool:
     except Exception:
         log.exception("player props: failed, continuing without them")
 
+    fr = load_frames()  # the whole box-score history: read it once per run (Supabase egress), not per step
     if not refresh_only and ingest_ok:  # no new box scores means nothing new to learn from
-        for r in train_all():
+        for r in train_all(fr):
             log.info("%s: MAE %.2f vs baseline %.2f promoted=%s", r["target"], r["mae"], r["baseline_mae"], r["promoted"])
 
-    slate = predict_slate(load_frames(), today, persist=True)
+    slate = predict_slate(fr, today, persist=True)
     log.info("predicted %d players across %d games for %s", len(slate["predictions"]), len(slate["games"]), today)
 
     # Freeze tonight's picks (line + prediction) for games that haven't started; the top 5 is ranked on these.
