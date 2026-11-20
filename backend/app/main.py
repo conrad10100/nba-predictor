@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, true
 from sqlalchemy.orm import aliased
 
 from app.clock import today_et
@@ -28,8 +28,8 @@ from app.ml.backtest import VERSION_PREFIX as BACKTEST_PREFIX
 from app.ml import top5
 from app.ml.predict import Overrides, predict_slate
 from app.models import (
-    DailyEvaluation, Game, LockedGame, ModelConfig, ModelRun, PickSnapshot, Player, PlayerGameStat, PlayerProp, Prediction, Team,
-    Top5Lock,
+    DailyEvaluation, DefenderRating, Game, GameLine, LockedGame, ModelConfig, ModelRun, PickSnapshot, Player, PlayerGameStat,
+    PlayerProp, Prediction, Team, TeamGameStat, Top5Lock,
 )
 
 @asynccontextmanager
@@ -45,20 +45,41 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)  # the Performance payload
 
 log = logging.getLogger("api")
 
-FRAMES_TTL_S = 600
-_frames: tuple[float, Frames] | None = None
+FRAMES_TTL_S = 6 * 3600  # backstop only: history is reloaded as soon as _history_fingerprint changes
+_frames: tuple[float, tuple, Frames] | None = None
 _slate_cache: dict[tuple, dict] = {}
 _lock = Lock()
 
 
+def _history_fingerprint() -> tuple:
+    """One small round trip that changes whenever a job writes anything load_frames reads: box scores, games
+    finishing or being scheduled, roster moves, game lines, defender ratings."""
+    cols = [
+        select(func.count()).select_from(Game).scalar_subquery(),
+        select(func.count()).select_from(Game).where(Game.status == "final").scalar_subquery(),
+        select(func.count()).select_from(PlayerGameStat).scalar_subquery(),
+        select(func.count()).select_from(TeamGameStat).scalar_subquery(),
+        select(func.count()).select_from(Player).scalar_subquery(),
+        select(func.sum(Player.team_id)).scalar_subquery(),
+        select(func.count()).select_from(GameLine).scalar_subquery(),
+        select(func.sum(GameLine.home_spread)).scalar_subquery(),
+        select(func.sum(GameLine.total)).scalar_subquery(),
+        select(func.count()).select_from(DefenderRating).scalar_subquery(),
+    ]
+    with SessionLocal() as s:
+        return tuple(s.execute(select(*cols)).one())
+
+
 def frames() -> Frames:
-    """History is only updated by the daily job, so keep it in memory for a few minutes."""
+    """The whole box-score history (several MB per read, the biggest single Supabase egress cost). It only changes
+    when a job writes, so keep it in memory until the history fingerprint changes."""
     global _frames
     with _lock:
-        if _frames is None or time.monotonic() - _frames[0] > FRAMES_TTL_S:
-            _frames = (time.monotonic(), load_frames())
+        fp = _history_fingerprint()
+        if _frames is None or _frames[1] != fp or time.monotonic() - _frames[0] > FRAMES_TTL_S:
+            _frames = (time.monotonic(), fp, load_frames())
             _slate_cache.clear()
-        return _frames[1]
+        return _frames[2]
 
 
 class SlateRequest(BaseModel):
@@ -286,7 +307,7 @@ RAW_COLUMNS = ["date", "game_id", "player_id", "player", "team_id", "team", "hom
                "open_line", "over_odds", "under_odds", "predicted", "p10", "p90", "actual", "model_version"]
 
 
-def _load(source, phase: str | None = None, on: date | None = None) -> pd.DataFrame:
+def _load(source, phase: str | None = None, on: date | None = None, kind: str | None = None) -> pd.DataFrame:
     """Prediction + line rows. `source` is PlayerProp (the current/closing lines with the stored predictions) or
     PickSnapshot (both frozen before tip-off, for one `phase`)."""
     team, home, away = aliased(Team), aliased(Team), aliased(Team)
@@ -307,6 +328,8 @@ def _load(source, phase: str | None = None, on: date | None = None) -> pd.DataFr
         q = q.where(source.phase == phase)
     if on is not None:
         q = q.where(Prediction.game_date == on)
+    if kind is not None:
+        q = q.where(_kind_filter(kind, vals.model_version))
     with SessionLocal() as s:
         return pd.DataFrame(s.execute(q).all(), columns=RAW_COLUMNS)
 
@@ -372,36 +395,60 @@ def _rank(df: pd.DataFrame, locks: top5.Locks | None = None) -> pd.DataFrame:
 # The grading below reads every prediction, line and snapshot and takes a couple of seconds, but the inputs only
 # change when the daily / evening jobs write. So results are cached against a cheap fingerprint of those tables and
 # recomputed only when it changes (or after DATA_TTL_S, as a backstop for writes the fingerprint can't see).
-DATA_TTL_S = 900
+# Every rebuild re-reads those tables from Supabase, and that egress is what the free plan limits, so the backstop is
+# long and live and backtest rows are cached separately: backtest rows never change once written, so a new live
+# prediction or line doesn't re-download the ~10k backtest predictions.
+DATA_TTL_S = 6 * 3600
+LIVE, BACKTEST = 0, 1  # parts of _fingerprint()
+KINDS = ("live", "backtest")
 _data_cache: dict[tuple, tuple[float, tuple, object]] = {}
 _data_locks: dict[tuple, Lock] = {}
 _data_locks_guard = Lock()
 
 
+def _is_backtest(col=Prediction.model_version):
+    return col.startswith(BACKTEST_PREFIX, autoescape=True)
+
+
+def _kind_filter(kind: str | None, col=Prediction.model_version):
+    return true() if kind is None else (_is_backtest(col) if kind == "backtest" else ~_is_backtest(col))
+
+
 def _fingerprint() -> tuple:
     """One round trip whose result changes whenever a job adds or re-predicts predictions, fills actuals, finishes
     games, or stores lines / pick snapshots. Counts and value sums rather than timestamps, because the jobs upsert and
-    an upsert doesn't touch updated_at."""
+    an upsert doesn't touch updated_at.
+
+    Returns (live part, backtest part): data that only live views read goes in the live part, the backtest
+    predictions in the backtest part, so caches of backtest rows survive the evening's live writes."""
+    def pred(kind):
+        w = _kind_filter(kind)
+        return [select(f).where(w).scalar_subquery() for f in
+                (func.count(), func.sum(Prediction.predicted), func.sum(Prediction.actual))]
+
     parts = [
-        func.count(), func.sum(Prediction.predicted), func.sum(Prediction.actual),
     ], [
         func.count(), func.sum(PlayerProp.line), func.sum(PlayerProp.over_odds), func.sum(PlayerProp.under_odds),
     ], [
         func.count(), func.sum(PickSnapshot.line), func.sum(PickSnapshot.predicted),
     ]
     sources = (Prediction, PlayerProp, PickSnapshot)
-    cols = [select(c).select_from(src).scalar_subquery() for src, cs in zip(sources, parts) for c in cs]
+    cols = pred("live") + [select(c).select_from(src).scalar_subquery() for src, cs in zip(sources, parts) for c in cs]
     cols.append(select(func.count()).select_from(Game).where(Game.status == "final").scalar_subquery())
     cols += [select(func.count()).select_from(t).scalar_subquery() for t in (LockedGame, Top5Lock)]  # top 5 settled at tip-off
+    cols += pred("backtest")
     with SessionLocal() as s:
-        return tuple(s.execute(select(*cols)).one())
+        row = tuple(s.execute(select(*cols)).one())
+    return row[:-3], row[-3:]
 
 
-def _cached(key: tuple, compute, fp: tuple | None = None):
-    """compute(), reused while the data fingerprint is unchanged. One computation per key at a time."""
+def _cached(key: tuple, compute, fp: tuple | None = None, part: int | None = None):
+    """compute(), reused while the data fingerprint (or just its `part`, LIVE / BACKTEST) is unchanged. One
+    computation per key at a time."""
     with _data_locks_guard:
         lock = _data_locks.setdefault(key, Lock())
     fp = _fingerprint() if fp is None else fp
+    fp = fp if part is None else fp[part]
     with lock:
         hit = _data_cache.get(key)
         if hit and hit[1] == fp and time.monotonic() - hit[0] < DATA_TTL_S:
@@ -411,11 +458,16 @@ def _cached(key: tuple, compute, fp: tuple | None = None):
         return value
 
 
-def _picks() -> pd.DataFrame:
-    return _cached(("picks",), _compute_picks)
+def _picks(fp: tuple | None = None) -> pd.DataFrame:
+    fp = _fingerprint() if fp is None else fp
+    parts = [_cached(("picks", kind), lambda k=kind: _compute_picks(k), fp, part) for part, kind in enumerate(KINDS)]
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame(columns=PICK_COLUMNS)
+    return pd.concat(parts, ignore_index=True).sort_values(["date", "player", "stat"]).reset_index(drop=True)
 
 
-def _compute_picks() -> pd.DataFrame:
+def _compute_picks(kind: str | None = None) -> pd.DataFrame:
     """Every prediction that has a DraftKings line, graded against the stored (latest / closing) line.
 
     - Pick: "over" when the prediction is above the line, "under" when below (no pick when exactly on it).
@@ -426,7 +478,7 @@ def _compute_picks() -> pd.DataFrame:
     - Units: 1 unit risked per pick at the DraftKings price for that side. EV: the model's expected units per pick,
       prob x payout - P(loss). Market prob: the book's no-vig chance for the same side.
     """
-    df = _grade(_load(PlayerProp))
+    df = _grade(_load(PlayerProp, kind=kind))
     for col in ("top5", "top5_gap"):
         df[col] = False
     df["confidence_rank"] = df["gap_rank"] = np.nan
@@ -436,7 +488,15 @@ def _compute_picks() -> pd.DataFrame:
 PHASES = ("morning", "final")
 
 
-def _view(allp: pd.DataFrame, kind: str, phase: str) -> pd.DataFrame:
+def _snapshots(phase: str, fp: tuple) -> pd.DataFrame:
+    """Graded pre-tip-off snapshots for one phase (live only), shared by every view that needs them."""
+    def compute():
+        snap = _load(PickSnapshot, phase, kind="live")
+        return _grade(snap) if not snap.empty else snap
+    return _cached(("snapshots", phase), compute, fp, LIVE)
+
+
+def _view(allp: pd.DataFrame, kind: str, phase: str, fp: tuple | None = None) -> pd.DataFrame:
     """The picks a Performance page grades, with each night's top 5 ranked.
 
     Live nights: only picks frozen before tip-off (pick_snapshots) for the page's phase: "morning" (the morning run,
@@ -448,8 +508,8 @@ def _view(allp: pd.DataFrame, kind: str, phase: str) -> pd.DataFrame:
     if kind == "backtest":
         df = allp[allp["kind"] == "backtest"]
     else:
-        snap = _load(PickSnapshot, phase)
-        df = _grade(snap) if not snap.empty else allp.iloc[0:0]
+        snap = _snapshots(phase, _fingerprint() if fp is None else fp)
+        df = snap if not snap.empty else allp.iloc[0:0]
         df = df[df["kind"] == "live"]
     if df.empty:
         return pd.DataFrame(columns=PICK_COLUMNS)
@@ -491,18 +551,21 @@ def _running(g: pd.DataFrame, by_stat: bool) -> list[dict]:
     return out
 
 
-def _top_performers(kind: str, picks: pd.DataFrame) -> list[dict]:
-    """Each night's top 5 by actual points / rebounds / assists, with what the model predicted and where it ranked them."""
+def _top_inputs(kind: str, fp: tuple | None = None) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """The predictions (with the model's rank each night) and box scores _top_performers needs for one kind. Read once
+    per data change and shared by both phases, since this reads every prediction of that kind."""
+    part = BACKTEST if kind == "backtest" else LIVE
+    return _cached(("top-inputs", kind), lambda: _load_top_inputs(kind), fp, part)
+
+
+def _load_top_inputs(kind: str) -> tuple[pd.DataFrame, pd.DataFrame] | None:
     with SessionLocal() as s:
         preds = pd.DataFrame(s.execute(select(Prediction.game_date, Prediction.player_id, Prediction.game_id, Prediction.target,
-                                              Prediction.predicted, Prediction.model_version)).all(),
-                             columns=["date", "player_id", "game_id", "stat", "predicted", "model_version"])
-        if preds.empty:
-            return []
-        preds = preds[preds["model_version"].str.startswith(BACKTEST_PREFIX) == (kind == "backtest")]
+                                              Prediction.predicted).where(_kind_filter(kind))).all(),
+                             columns=["date", "player_id", "game_id", "stat", "predicted"])
         dates = sorted(set(preds["date"]))
         if not dates:
-            return []
+            return None
         box = pd.DataFrame(s.execute(
             select(Game.date, PlayerGameStat.player_id, PlayerGameStat.game_id, Player.name, Team.abbr, PlayerGameStat.pts, PlayerGameStat.reb,
                    PlayerGameStat.ast)
@@ -510,6 +573,15 @@ def _top_performers(kind: str, picks: pd.DataFrame) -> list[dict]:
             .join(Team, Team.id == PlayerGameStat.team_id, isouter=True).where(Game.date.in_(dates))
         ).all(), columns=["date", "player_id", "game_id", "player", "team", "pts", "reb", "ast"])
     preds["model_rank"] = preds.groupby(["date", "stat"])["predicted"].rank(ascending=False, method="min").astype(int)
+    return preds, box
+
+
+def _top_performers(kind: str, picks: pd.DataFrame, fp: tuple | None = None) -> list[dict]:
+    """Each night's top 5 by actual points / rebounds / assists, with what the model predicted and where it ranked them."""
+    inputs = _top_inputs(kind, fp)
+    if inputs is None:
+        return []
+    preds, box = inputs
     keys = ["player_id", "game_id", "stat"]
     top = (box.melt(id_vars=["date", "player_id", "game_id", "player", "team"], value_vars=["pts", "reb", "ast"],
                     var_name="stat", value_name="actual")
@@ -560,7 +632,7 @@ def _refresh_performance():
     fp = _fingerprint()
     for phase in PHASES:
         for kind in ("live", "backtest"):
-            _cached(("performance", kind, phase), lambda k=kind, p=phase: _encode(_performance(k, p)), fp)
+            _cached(("performance", kind, phase), lambda k=kind, p=phase: _encode(_performance(k, p, fp)), fp)
 
 
 def _refresh_loop():
@@ -573,9 +645,10 @@ def _refresh_loop():
         time.sleep(REFRESH_EVERY_S)
 
 
-def _performance(kind: str, phase: str) -> dict:
-    allp = _picks()
-    views = {k: _view(allp, k, phase) for k in ("live", "backtest")}
+def _performance(kind: str, phase: str, fp: tuple | None = None) -> dict:
+    fp = _fingerprint() if fp is None else fp
+    allp = _picks(fp)
+    views = {k: _view(allp, k, phase, fp) for k in KINDS}
     available = {k: int(v["result"].isin(DECIDED).sum()) for k, v in views.items()}
     df = views[kind]
     decided = df[df["result"].isin(DECIDED)]
@@ -586,7 +659,7 @@ def _performance(kind: str, phase: str) -> dict:
     by_confidence = [{"label": label, **_record(decided[(prob >= lo) & (prob < hi)])}
                      for lo, hi, label in [(0, 0.55, "Under 55%"), (0.55, 0.6, "55–60%"), (0.6, 0.65, "60–65%"), (0.65, 0.7, "65–70%"),
                                            (0.7, 1.01, "70%+")]]
-    top = _top_performers(kind, df)
+    top = _top_performers(kind, df, fp)
     top_df = pd.DataFrame(top)
     top_summary = None
     if not top_df.empty:

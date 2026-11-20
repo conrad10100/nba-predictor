@@ -14,7 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from app.clock import today_et
 from app.config import TARGETS as ACTIVE_TARGETS
 from app.db import SessionLocal, upsert
-from app.features.build import DEFENDER_FEATURES, FEATURES, build_features, load_frames, training_rows
+from app.features.build import DEFENDER_FEATURES, FEATURES, Frames, build_features, load_frames, training_rows
 from app.ml import intervals, tuning
 from app.ml.registry import dump
 from app.ml.xgb import XGBModel
@@ -174,8 +174,9 @@ def _diff(a: dict, b: dict) -> str:
     return ", ".join(f"{k}={b[k]}" for k in b if a.get(k) != b[k]) or "(same)"
 
 
-def train_all() -> list[dict]:
-    rows = training_rows(build_features(load_frames()))
+def train_all(fr: Frames | None = None) -> list[dict]:
+    """`fr`: history already loaded by the caller (the daily job reuses it for the slate instead of reading it twice)."""
+    rows = training_rows(build_features(fr if fr is not None else load_frames()))
     version = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     results = []
     for target in ACTIVE_TARGETS:

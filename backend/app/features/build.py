@@ -83,10 +83,15 @@ class Frames:
     defender_ratings: pd.DataFrame = field(default_factory=empty_ratings)  # DBPM snapshots (defender_ratings)
 
 
+# Box-score columns no feature reads. load_frames pulls every player-game row ever stored (one of the biggest
+# sources of Supabase egress), so it leaves these out.
+UNUSED_BOX_COLS = {"stl", "blk", "plus_minus"}
+
+
 def load_frames() -> Frames:
     with engine.connect() as conn:
         games = pd.read_sql(select(Game), conn, parse_dates=["date"])
-        ps = pd.read_sql(select(PlayerGameStat), conn)
+        ps = pd.read_sql(select(*[c for c in PlayerGameStat.__table__.c if c.name not in UNUSED_BOX_COLS]), conn)
         ts = pd.read_sql(select(TeamGameStat), conn)
         players = pd.read_sql(select(Player), conn)
         teams = pd.read_sql(select(Team), conn)
