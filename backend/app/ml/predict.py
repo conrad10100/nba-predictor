@@ -50,7 +50,11 @@ def expected_roster(fr: Frames, games: pd.DataFrame, on: date) -> pd.DataFrame:
     return roster.merge(by_team, on="team_id")
 
 
-def predict_slate(fr: Frames, on: date, overrides: Overrides | None = None, persist: bool = False) -> dict:
+def predict_slate(fr: Frames, on: date, overrides: Overrides | None = None, persist: bool = False,
+                  started: set[str] = frozenset()) -> dict:
+    """Predict every player on `on`'s slate. With persist, store the predictions, except for `started` games: those
+    keep the pre-game numbers already stored, so a refresh after an early tip-off can't rewrite them from news that
+    came out during the game (a player hurt mid-game, say). Evaluation and the bias correction grade what's stored."""
     overrides = overrides or Overrides()
     games = fr.games[(fr.games["date"] == pd.Timestamp(on)) & (fr.games["status"] == "scheduled")]
     if games.empty:
@@ -87,8 +91,9 @@ def predict_slate(fr: Frames, on: date, overrides: Overrides | None = None, pers
     rows["pra_pred"] = rows[[f"{t}_pred" for t in TARGETS]].sum(axis=1, min_count=len(TARGETS))
 
     if persist:
-        _save(rows, version, on, injuries, predicted)
-        shadow.save_predictions(rows, on, predicted)  # week-long live test of the shadow model; never affects picks
+        pregame = rows[~rows["game_id"].isin(started)]
+        _save(pregame, version, on, injuries, predicted)
+        shadow.save_predictions(pregame, on, predicted)  # week-long live test of the shadow model; never affects picks
     return _response(fr, games, rows, out, injuries, overrides, version, on)
 
 

@@ -47,8 +47,9 @@ WHERE actual IS NULL AND EXISTS (
 """)
 
 
-def run(refresh_only: bool = False) -> bool:
-    """Returns False if the box-score download failed (everything else still runs)."""
+def run(refresh_only: bool = False, started: set[str] = frozenset()) -> bool:
+    """Returns False if the box-score download failed (everything else still runs). `started`: today's games that
+    have already tipped off, whose stored predictions are left as they were."""
     today = today_et()
     init_db()
     # stats.nba.com sometimes times out or blocks cloud IPs. Don't lose the whole day to it: still store injuries,
@@ -98,8 +99,9 @@ def run(refresh_only: bool = False) -> bool:
         for r in train_all(fr):
             log.info("%s: MAE %.2f vs baseline %.2f promoted=%s", r["target"], r["mae"], r["baseline_mae"], r["promoted"])
 
-    slate = predict_slate(fr, today, persist=True)
-    log.info("predicted %d players across %d games for %s", len(slate["predictions"]), len(slate["games"]), today)
+    slate = predict_slate(fr, today, persist=True, started=started)
+    log.info("predicted %d players across %d games for %s (%d already started, left as stored)",
+             len(slate["predictions"]), len(slate["games"]), today, len(started))
 
     # Freeze tonight's picks (line + prediction) for games that haven't started; the top 5 is ranked on these.
     try:
@@ -163,23 +165,31 @@ def _tipping_soon(tipoffs: list[dict], within: timedelta, now: datetime | None =
     return [g for g in tipoffs if g["state"] == "pre" and -LATE_TIP_GRACE <= g["start"] - now <= within]
 
 
-def _lock_started(today, tipoffs: list[dict]) -> None:
+def _game_ids(today, tipoffs: list[dict]) -> set[str]:
+    """Our game ids for ESPN scoreboard entries (matched on today's home/away teams)."""
+    from app.models import Team
+
+    init_db()
+    with engine.connect() as conn:
+        abbr_to_id = dict(conn.execute(select(Team.abbr, Team.id)).all())
+        by_matchup = {(h, a): gid for gid, h, a in conn.execute(
+            select(Game.id, Game.home_team_id, Game.away_team_id).where(Game.date == today)).all()}
+    return {by_matchup.get((abbr_to_id.get(g["home"]), abbr_to_id.get(g["away"]))) for g in tipoffs} - {None}
+
+
+def _started(tipoffs: list[dict]) -> list[dict]:
+    return [g for g in tipoffs if g["state"] != "pre"]
+
+
+def _lock_started(today, started_ids: set[str]) -> None:
     """Settle the top 5 for games that have tipped off since the last run (app.ml.top5). Runs before this run
     re-freezes any pick, so it sees the board as it stood at their tip-off. Never stops the refresh."""
-    started = [g for g in tipoffs if g["state"] != "pre"]
-    if not started:
+    if not started_ids:
         return
     try:
         from app.ml import top5
-        from app.models import Team
 
-        init_db()
-        with engine.connect() as conn:
-            abbr_to_id = dict(conn.execute(select(Team.abbr, Team.id)).all())
-            by_matchup = {(h, a): gid for gid, h, a in conn.execute(
-                select(Game.id, Game.home_team_id, Game.away_team_id).where(Game.date == today)).all()}
-        ids = {by_matchup.get((abbr_to_id.get(g["home"]), abbr_to_id.get(g["away"]))) for g in started} - {None}
-        n_games, n_picks = top5.lock_started(today, ids)
+        n_games, n_picks = top5.lock_started(today, started_ids)
         if n_games:
             log.info("top 5 settled at tip-off: %d games just started, %d of their picks locked in", n_games, n_picks)
     except Exception:
@@ -203,16 +213,21 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.before_tip is not None and not args.refresh:
         parser.error("--before-tip needs --refresh")
+    started_ids: set[str] = set()
     if args.refresh:
         from app.ingest import nba_client
 
         tipoffs = nba_client.espn_tipoffs(today_et())
-        _lock_started(today_et(), tipoffs)
+        try:
+            started_ids = _game_ids(today_et(), _started(tipoffs))
+        except Exception:
+            log.exception("matching started games failed; continuing")
+        _lock_started(today_et(), started_ids)
     if args.before_tip is not None:
         soon = _tipping_soon(tipoffs, timedelta(minutes=args.before_tip))
         if not soon:
             log.info("no game tips off in the next %d minutes; nothing to refresh", args.before_tip)
             sys.exit(0)
         log.info("tipping off soon: %s", ", ".join(f"{g['away']}@{g['home']} {g['start']:%H:%M}Z" for g in soon))
-    if not run(args.refresh):
+    if not run(args.refresh, started_ids):
         sys.exit(1)  # so Railway still shows the run as failed
