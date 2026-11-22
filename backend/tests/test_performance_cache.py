@@ -52,3 +52,33 @@ def test_picks_concatenates_kinds(monkeypatch):
     df = m._picks()
     assert list(df["kind"]) == ["backtest", "live"]  # sorted by date across both kinds
     assert list(df.columns) == list(m.PICK_COLUMNS)
+
+
+def test_fingerprint_waits_for_a_job_run_to_settle(monkeypatch):
+    """A run's writes come one after another; the caches should rebuild once after it, not after each write."""
+    clock, raw = [1000.0], [("a",)]
+    monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(m, "_read_fingerprint", lambda: raw[0])
+    monkeypatch.setattr(m, "_fp_state", {"current": None, "pending": None, "pending_since": 0.0, "seen_since": 0.0})
+    assert m._fingerprint() == ("a",)
+    for i, v in enumerate(["b", "c", "d"]):  # the run's writes, a minute apart
+        raw[0] = (v,)
+        clock[0] += 60
+        assert m._fingerprint() == ("a",)
+    clock[0] += m.FP_SETTLE_S - 1
+    assert m._fingerprint() == ("a",)
+    clock[0] += 1
+    assert m._fingerprint() == ("d",)  # settled: one rebuild for the whole run
+
+
+def test_fingerprint_moves_on_if_writes_never_stop(monkeypatch):
+    clock, raw = [0.0], [(0,)]
+    monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(m, "_read_fingerprint", lambda: raw[0])
+    monkeypatch.setattr(m, "_fp_state", {"current": None, "pending": None, "pending_since": 0.0, "seen_since": 0.0})
+    m._fingerprint()
+    seen = set()
+    for i in range(1, 20):
+        raw[0], clock[0] = (i,), clock[0] + 60
+        seen.add(m._fingerprint())
+    assert len(seen) > 1  # still refreshed within FP_MAX_PENDING_S

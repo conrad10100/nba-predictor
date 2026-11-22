@@ -327,3 +327,15 @@ class ShadowVerdict(Base):
     shadow_params: Mapped[dict] = mapped_column(JSON)
     switched: Mapped[bool] = mapped_column(Boolean)
     metrics: Mapped[dict] = mapped_column(JSON)  # compare() output
+
+
+class HistoryCache(Base):
+    """The box-score history (player_game_stats, team_game_stats) as one gzipped CSV, so jobs and the API download
+    ~1 MB instead of every row (~10 MB over the wire, the biggest share of Supabase egress). `fingerprint` is a hash
+    of the tables' contents when it was written; a reader that sees a different hash rebuilds it."""
+
+    __tablename__ = "history_cache"
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(128))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())

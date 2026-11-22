@@ -415,7 +415,32 @@ def _kind_filter(kind: str | None, col=Prediction.model_version):
     return true() if kind is None else (_is_backtest(col) if kind == "backtest" else ~_is_backtest(col))
 
 
+# A job run writes predictions, lines, snapshots and the top 5 log one after another over a few minutes, and every
+# change used to trigger its own rebuild (each one re-reading the live rows). So a new fingerprint is only acted on
+# once it has held still for FP_SETTLE_S, or has been pending for FP_MAX_PENDING_S if writes keep coming.
+FP_SETTLE_S = 180
+FP_MAX_PENDING_S = 900
+_fp_state: dict = {"current": None, "pending": None, "pending_since": 0.0, "seen_since": 0.0}
+_fp_lock = Lock()
+
+
 def _fingerprint() -> tuple:
+    """The data fingerprint the caches key on: _read_fingerprint(), settled (see FP_SETTLE_S)."""
+    new, now = _read_fingerprint(), time.monotonic()
+    with _fp_lock:
+        st = _fp_state
+        if st["current"] is None or new == st["current"]:
+            st["current"], st["pending"] = new, None
+        elif new != st["pending"]:  # another write: wait for it to settle
+            if st["pending"] is None:
+                st["pending_since"] = now
+            st["pending"], st["seen_since"] = new, now
+        if st["pending"] is not None and (now - st["seen_since"] >= FP_SETTLE_S or now - st["pending_since"] >= FP_MAX_PENDING_S):
+            st["current"], st["pending"] = st["pending"], None
+        return st["current"]
+
+
+def _read_fingerprint() -> tuple:
     """One round trip whose result changes whenever a job adds or re-predicts predictions, fills actuals, finishes
     games, or stores lines / pick snapshots. Counts and value sums rather than timestamps, because the jobs upsert and
     an upsert doesn't touch updated_at.
