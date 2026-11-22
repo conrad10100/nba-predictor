@@ -4,15 +4,21 @@ Every rolling stat is computed from games strictly BEFORE the row's game (shift(
 builds leak-free training rows for history and feature rows for upcoming games (whose stats are NaN).
 """
 
+import gzip
+import io
+import json
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from app.db import engine
+from app.db import engine, upsert
 from app.features.defenders import DEFENDER_FEATURES, RATING_COLS, empty_ratings, merge_defender_features
-from app.models import DefenderRating, Game, GameLine, Player, PlayerGameStat, Team, TeamGameStat
+from app.models import DefenderRating, Game, GameLine, HistoryCache, Player, PlayerGameStat, Team, TeamGameStat
+
+log = logging.getLogger(__name__)
 
 TARGETS = ["pts", "reb", "ast"]
 PLAYER_ROLL_COLS = ["pts", "reb", "ast", "min", "fga", "fta", "fg3a", "usg"]
@@ -89,15 +95,75 @@ UNUSED_BOX_COLS = {"stl", "blk", "plus_minus"}
 
 
 def load_frames() -> Frames:
+    ps, ts = _box_history()
     with engine.connect() as conn:
         games = pd.read_sql(select(Game), conn, parse_dates=["date"])
-        ps = pd.read_sql(select(*[c for c in PlayerGameStat.__table__.c if c.name not in UNUSED_BOX_COLS]), conn)
-        ts = pd.read_sql(select(TeamGameStat), conn)
         players = pd.read_sql(select(Player), conn)
         teams = pd.read_sql(select(Team), conn)
         lines = pd.read_sql(select(GameLine.game_id, GameLine.home_spread, GameLine.total), conn)
         ratings = pd.read_sql(select(*[getattr(DefenderRating, c) for c in RATING_COLS]), conn)
     return Frames(ps, ts, games, players, teams, lines, ratings)
+
+
+BOX_CACHE = "box_history"
+
+
+def _box_fingerprint(conn) -> str:
+    """A hash of every row of both box-score tables, computed in the database (one small row back), so any insert,
+    delete or corrected stat changes it."""
+    if conn.dialect.name != "postgresql":
+        return ""  # SQLite (tests, local dev): no cache, always read the tables
+    row = conn.execute(text(
+        "select (select count(*) || ':' || coalesce(sum(hashtext(p::text)::bigint), 0) from player_game_stats p),"
+        " (select count(*) || ':' || coalesce(sum(hashtext(t::text)::bigint), 0) from team_game_stats t)"
+    )).one()
+    return f"v1|{row[0]}|{row[1]}"
+
+
+def pack_frames(frames: dict[str, pd.DataFrame]) -> bytes:
+    """DataFrames -> gzipped CSV with their dtypes, restored exactly by unpack_frames (no pickle: it's read back
+    from the database)."""
+    out = {}
+    for name, df in frames.items():
+        out[name] = {"dtypes": {c: str(t) for c, t in df.dtypes.items()}, "csv": df.to_csv(index=False)}
+    return gzip.compress(json.dumps(out).encode(), compresslevel=9)
+
+
+def unpack_frames(blob: bytes) -> dict[str, pd.DataFrame]:
+    frames = {}
+    for name, v in json.loads(gzip.decompress(blob)).items():
+        dtypes = {c: (str if t in ("object", "str", "string") else t) for c, t in v["dtypes"].items()}
+        df = pd.read_csv(io.StringIO(v["csv"]), dtype=dtypes, keep_default_na=False,
+                         na_values=[""])
+        frames[name] = df[list(v["dtypes"])]
+    return frames
+
+
+def _read_box(conn) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ps = pd.read_sql(select(*[c for c in PlayerGameStat.__table__.c if c.name not in UNUSED_BOX_COLS]), conn)
+    ts = pd.read_sql(select(TeamGameStat), conn)
+    return ps, ts
+
+
+def _box_history() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """player_game_stats and team_game_stats, from the compressed history_cache copy when it is current."""
+    with engine.connect() as conn:
+        fp = _box_fingerprint(conn)
+        if not fp:
+            return _read_box(conn)
+        cached = conn.execute(select(HistoryCache.data).where(HistoryCache.name == BOX_CACHE, HistoryCache.fingerprint == fp)).scalar()
+        if cached is not None:
+            try:
+                f = unpack_frames(cached)
+                return f["player_stats"], f["team_stats"]
+            except Exception:
+                log.exception("history cache unreadable; reading the tables")
+        ps, ts = _read_box(conn)
+    try:  # a failed write only means the next reader downloads the tables too
+        upsert(HistoryCache.__table__, [{"name": BOX_CACHE, "fingerprint": fp, "data": pack_frames({"player_stats": ps, "team_stats": ts})}])
+    except Exception:
+        log.exception("history cache: write failed")
+    return ps, ts
 
 
 @dataclass
