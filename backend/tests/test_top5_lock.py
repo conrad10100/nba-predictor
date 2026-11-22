@@ -22,7 +22,7 @@ def _top(df: pd.DataFrame, flag: str = "top5") -> set[int]:
 
 
 def _settle(df: pd.DataFrame, locks: top5.Locks, game: str) -> None:
-    """What lock_started does when `game` tips: lock its picks that are in the top 5 right now."""
+    """What top5.settle does when `game` tips: lock its picks that are in the top 5 right now."""
     ranked = m._rank(df, locks)
     for method, (flag, _) in top5.METHODS.items():
         hit = ranked[ranked[flag] & (ranked["game_id"] == game)]
