@@ -129,6 +129,16 @@ export type Pick = {
   edge: number; pick: "over" | "under" | null; odds: number; odds_assumed: boolean; prob: number | null; market_prob: number | null;
   ev: number | null; actual: number | null; result: PickResult; units: number | null; open_pick: "over" | "under" | null; clv: number | null; top5: boolean; confidence_rank: number | null; top5_gap: boolean; gap_rank: number | null; rank?: number;
   model_version: string; kind: Kind;
+  /** The pick's top-5 slot (by confidence / by gap) is settled; a top-5 pick that isn't locked is provisional. */
+  locked?: boolean; locked_gap?: boolean;
+};
+
+/** A pick that was in the night's top 5 at some point, graded at the line it was first shown at. Times are UTC ISO. */
+export type SeenPick = {
+  date: string; game_id: string; player_id: number; player: string | null; team: string | null; opp: string | null; stat: Target;
+  pick: "over" | "under"; line: number; odds: number | null; prob: number | null; predicted: number | null;
+  first_seen_at: string; last_seen_at: string; best_rank: number; in_top5: boolean; locked: boolean;
+  actual: number | null; result: PickResult; units: number | null;
 };
 
 export type TopPerformer = {
@@ -159,6 +169,8 @@ export type Performance = {
   by_confidence: ({ label: string } & Record_)[];
   top5: Record<Top5Method, Top5Strategy>;
   top_performers: TopPerformer[];
+  /** Live after-injuries page only (empty otherwise). */
+  top5_seen?: Record<Top5Method, SeenPick[]>;
   top_summary: { nights: number; in_model_top5: Partial<Record<Target, number>>; record: Partial<Record<StatKey, SimpleRecord>> } | null;
   picks: Pick[];
 };

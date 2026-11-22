@@ -6,7 +6,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { LineChart } from "@/components/LineChart";
 import {
   api, fmt, performanceExportUrl, STAT_LABEL, TARGETS,
-  type Kind, type Performance, type Pick as PickRow, type PickResult, type Phase, type Record_, type RunningRow, type StatKey, type Target, type Top5Method,
+  type Kind, type Performance, type Pick as PickRow, type PickResult, type SeenPick, type Phase, type Record_, type RunningRow, type StatKey, type Target, type Top5Method,
 } from "@/lib/api";
 
 // At standard -110 juice you need to win 110/210 of decided picks to break even.
@@ -49,14 +49,14 @@ const PHASE: Record<Phase, { title: string; about: string; other: { href: string
   morning: {
     title: "Performance vs. DraftKings: morning picks",
     about: "Picks as they stood after the morning run (about 5am ET), before the evening injury update.",
-    other: { href: "/performance/after-injuries", label: "Compare with picks after the 6pm ET injury update →" },
+    other: { href: "/performance/after-injuries", label: "Compare with picks after each game's last injury update →" },
     provisional: "Locked at the morning run. Once a game tips off its picks can't change, and lines DraftKings posts later never count.",
   },
   final: {
     title: "Performance vs. DraftKings: after the injury update",
-    about: "Picks as they stood after the 6pm ET injury update, the last update before most tip-offs (earlier games keep their morning picks).",
+    about: "Picks as they stood after each game's last injury update, taken within 15 minutes of its tip-off.",
     other: { href: "/performance", label: "← Compare with the morning picks" },
-    provisional: "Provisional until the 6pm ET injury update locks it. Once a game tips off its picks can't change, and lines DraftKings posts later never count.",
+    provisional: "Locked picks are settled at their game's last injury update (within 15 minutes of tip-off) and keep their slot and line for good. Provisional picks can still change or drop out until then, so bet a pick once it shows Locked.",
   },
 };
 
@@ -231,6 +231,9 @@ function ConfidentSection({ perf, provisional }: { perf: Performance; provisiona
   const dates = c.running.map((r) => r.date);
   const other: Top5Method = method === "gap" ? "confidence" : "gap";
   const o = perf.top5[other].totals;
+  const showStatus = perf.kind === "live" && perf.phase === "final";
+  const isLocked = (p: PickRow) => (method === "gap" ? p.locked_gap : p.locked) ?? false;
+  const seen = (perf.top5_seen?.[method] ?? []).filter((p) => p.date === shown);
 
   return (
     <section className="space-y-4">
@@ -307,6 +310,7 @@ function ConfidentSection({ perf, provisional }: { perf: Performance; provisiona
                   <th className="px-3 py-2 text-right font-medium">Actual</th>
                   <th className="px-3 py-2 font-medium">Result</th>
                   <th className="px-4 py-2 text-right font-medium">Units</th>
+                  {showStatus && <th className="px-4 py-2 font-medium">Status</th>}
                 </tr>
               </thead>
               <tbody>
@@ -324,6 +328,7 @@ function ConfidentSection({ perf, provisional }: { perf: Performance; provisiona
                     <td className="num px-3 py-1.5 text-right font-medium">{p.actual ?? "–"}</td>
                     <td className="px-3 py-1.5"><ResultBadge result={p.result} /></td>
                     <td className="num px-4 py-1.5 text-right"><Units value={p.units} /></td>
+                    {showStatus && <td className="px-4 py-1.5"><LockBadge locked={isLocked(p)} /></td>}
                   </tr>
                 ))}
               </tbody>
@@ -338,12 +343,77 @@ function ConfidentSection({ perf, provisional }: { perf: Performance; provisiona
         </div>
       )}
 
+      {showStatus && seen.length > 0 && <SeenTable rows={seen} />}
+
       {c.running.length > 0 && <RunningTally rows={c.running} title={`Night by night, top 5 by ${METHOD[method].label.toLowerCase()}`} />}
     </section>
   );
 }
 
-function NightSummary({ rows }: { rows: PickRow[] }) {
+function LockBadge({ locked }: { locked: boolean }) {
+  return locked
+    ? <span className="rounded bg-good/15 px-1.5 py-0.5 text-xs font-medium text-good">Locked</span>
+    : <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs font-medium text-text-2">Provisional</span>;
+}
+
+const etTime = (iso: string) =>
+  new Date(iso).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" });
+
+/** Everyone who was in the night's top 5 at any point, graded at the line they were first shown at. */
+function SeenTable({ rows }: { rows: SeenPick[] }) {
+  const dropped = rows.filter((p) => !p.in_top5).length;
+  return (
+    <div className="rounded-lg border border-border bg-surface">
+      <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2.5">
+        <span className="text-sm font-medium">Everyone who made the top 5</span>
+        <NightSummary rows={rows} />
+        {dropped > 0 && <span className="text-sm text-text-2">· {dropped} dropped out</span>}
+      </div>
+      <p className="px-4 pt-2 text-xs text-text-2">
+        Every pick that showed in this top 5 at any point tonight, at the line it first showed with: what a bet placed then got.
+        Times are ET.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px] whitespace-nowrap text-sm">
+          <thead className="text-left text-xs text-text-2">
+            <tr className="border-b border-border">
+              <th className="px-4 py-2 font-medium">Player</th>
+              <th className="px-3 py-2 font-medium">Pick when shown</th>
+              <th className="px-3 py-2 text-right font-medium">Confidence</th>
+              <th className="px-3 py-2 font-medium">Shown</th>
+              <th className="px-3 py-2 text-right font-medium">Best rank</th>
+              <th className="px-3 py-2 font-medium">Now</th>
+              <th className="px-3 py-2 text-right font-medium">Actual</th>
+              <th className="px-3 py-2 font-medium">Result</th>
+              <th className="px-4 py-2 text-right font-medium">Units</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={`${p.game_id}-${p.player_id}`} className="border-b border-border/60 last:border-0">
+                <td className="px-4 py-1.5"><PlayerCell p={p} /></td>
+                <td className="num px-3 py-1.5 font-medium"><PickText pick={p.pick} line={p.line} /> <span className="text-xs text-text-2">{oddsText(p.odds)}</span></td>
+                <td className="num px-3 py-1.5 text-right">{pctText(p.prob)}</td>
+                <td className="num px-3 py-1.5 text-text-2">
+                  {etTime(p.first_seen_at)}{p.last_seen_at !== p.first_seen_at && ` – ${etTime(p.last_seen_at)}`}
+                </td>
+                <td className="num px-3 py-1.5 text-right text-text-2">{p.best_rank}</td>
+                <td className="px-3 py-1.5">
+                  {p.in_top5 ? <LockBadge locked={p.locked} /> : <span className="rounded bg-critical/10 px-1.5 py-0.5 text-xs font-medium text-critical">Dropped out</span>}
+                </td>
+                <td className="num px-3 py-1.5 text-right font-medium">{p.actual ?? "–"}</td>
+                <td className="px-3 py-1.5"><ResultBadge result={p.result} /></td>
+                <td className="num px-4 py-1.5 text-right"><Units value={p.units} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function NightSummary({ rows }: { rows: { result: PickResult; units: number | null }[] }) {
   const n = (r: PickResult) => rows.filter((p) => p.result === r).length;
   const units = rows.reduce((s, p) => s + (p.units ?? 0), 0);
   const pending = n("pending");

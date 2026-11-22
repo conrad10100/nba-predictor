@@ -24,6 +24,7 @@ from app.ingest.load import (
 )
 from app.ingest import defense
 from app.init_db import init_db
+from app.ml import top5
 from app.ml.evaluate import evaluate_pending, update_bias_corrections
 from app.ml.predict import predict_slate
 from app.ml.shadow import weekly_decision
@@ -47,9 +48,10 @@ WHERE actual IS NULL AND EXISTS (
 """)
 
 
-def run(refresh_only: bool = False, started: set[str] = frozenset()) -> bool:
+def run(refresh_only: bool = False, started: set[str] = frozenset(), settle: set[str] = frozenset()) -> bool:
     """Returns False if the box-score download failed (everything else still runs). `started`: today's games that
-    have already tipped off, whose stored predictions are left as they were."""
+    have already tipped off, whose stored predictions are left as they were. `settle`: games getting their last
+    refresh before tip-off, whose top 5 picks are locked in after it (app.ml.top5)."""
     today = today_et()
     init_db()
     # stats.nba.com sometimes times out or blocks cloud IPs. Don't lose the whole day to it: still store injuries,
@@ -103,13 +105,22 @@ def run(refresh_only: bool = False, started: set[str] = frozenset()) -> bool:
     log.info("predicted %d players across %d games for %s (%d already started, left as stored)",
              len(slate["predictions"]), len(slate["games"]), today, len(started))
 
-    # Freeze tonight's picks (line + prediction) for games that haven't started; the top 5 is ranked on these.
+    # Freeze tonight's picks (line + prediction) for games that haven't started; the top 5 is ranked on these. Games
+    # whose top 5 is already settled keep the snapshot it was settled on, so a locked pick keeps the line it showed.
     try:
         phases = ("final",) if refresh_only else ("morning", "final")
-        log.info("pick snapshots (%s): %d frozen for %d games not yet started", "/".join(phases),
-                 snapshot_pregame(pregame_games, phases), len(pregame_games))
+        frozen = pregame_games - top5.settled_games(today)
+        log.info("pick snapshots (%s): %d frozen for %d games not yet started or settled", "/".join(phases),
+                 snapshot_pregame(frozen, phases), len(frozen))
     except Exception:
         log.exception("pick snapshots: failed")
+    try:
+        if settle:
+            n_games, n_picks = top5.settle(today, settle)
+            log.info("top 5 settled at the last refresh: %d games, %d of their picks locked in", n_games, n_picks)
+        log.info("top 5 log: %d picks on the board", top5.record_seen(today))
+    except Exception:
+        log.exception("top 5 settle / log: failed")
     return ingest_ok
 
 
@@ -182,18 +193,23 @@ def _started(tipoffs: list[dict]) -> list[dict]:
 
 
 def _lock_started(today, started_ids: set[str]) -> None:
-    """Settle the top 5 for games that have tipped off since the last run (app.ml.top5). Runs before this run
-    re-freezes any pick, so it sees the board as it stood at their tip-off. Never stops the refresh."""
+    """Settle the top 5 for games that tipped off without being settled at their last refresh (that refresh failed or
+    didn't run). Runs before this run re-freezes any pick, so it sees the board as it stood at their tip-off. Never
+    stops the refresh."""
     if not started_ids:
         return
     try:
-        from app.ml import top5
-
-        n_games, n_picks = top5.lock_started(today, started_ids)
+        n_games, n_picks = top5.settle(today, started_ids)
         if n_games:
             log.info("top 5 settled at tip-off: %d games just started, %d of their picks locked in", n_games, n_picks)
     except Exception:
         log.exception("top 5 lock: failed, continuing")
+
+
+def _last_refresh(soon: list[dict], now: datetime | None = None) -> list[dict]:
+    """The games among `soon` whose next refresh would come after tip-off, so this one is their last."""
+    now = now or datetime.now(timezone.utc)
+    return [g for g in soon if g["start"] - now <= top5.LOCK_WITHIN]
 
 
 def _missing_last_night(today) -> bool:
@@ -214,6 +230,7 @@ if __name__ == "__main__":
     if args.before_tip is not None and not args.refresh:
         parser.error("--before-tip needs --refresh")
     started_ids: set[str] = set()
+    settle_ids: set[str] = set()
     if args.refresh:
         from app.ingest import nba_client
 
@@ -229,5 +246,9 @@ if __name__ == "__main__":
             log.info("no game tips off in the next %d minutes; nothing to refresh", args.before_tip)
             sys.exit(0)
         log.info("tipping off soon: %s", ", ".join(f"{g['away']}@{g['home']} {g['start']:%H:%M}Z" for g in soon))
-    if not run(args.refresh, started_ids):
+        try:
+            settle_ids = _game_ids(today_et(), _last_refresh(soon))
+        except Exception:
+            log.exception("matching games to settle failed; they'll settle at tip-off")
+    if not run(args.refresh, started_ids, settle_ids):
         sys.exit(1)  # so Railway still shows the run as failed

@@ -29,7 +29,7 @@ from app.ml import top5
 from app.ml.predict import Overrides, predict_slate
 from app.models import (
     DailyEvaluation, DefenderRating, Game, GameLine, LockedGame, ModelConfig, ModelRun, PickSnapshot, Player, PlayerGameStat,
-    PlayerProp, Prediction, Team, TeamGameStat, Top5Lock,
+    PlayerProp, Prediction, Team, TeamGameStat, Top5Lock, Top5Seen,
 )
 
 @asynccontextmanager
@@ -291,7 +291,8 @@ TOP_STAT = "pts"  # the nightly top-5 picks are player points props
 DECIDED = ("win", "loss", "push")
 PICK_COLUMNS = ["date", "game_id", "player_id", "player", "team", "opp", "stat", "line", "open_line", "over_odds", "under_odds",
                 "predicted", "p10", "p90", "edge", "pick", "odds", "odds_assumed", "prob", "market_prob", "ev", "actual", "result",
-                "units", "open_pick", "clv", "top5", "confidence_rank", "top5_gap", "gap_rank", "model_version", "kind"]
+                "units", "open_pick", "clv", "top5", "confidence_rank", "top5_gap", "gap_rank", "model_version", "kind", "locked",
+                "locked_gap"]
 
 
 def _payout(odds: pd.Series) -> pd.Series:
@@ -435,7 +436,8 @@ def _fingerprint() -> tuple:
     sources = (Prediction, PlayerProp, PickSnapshot)
     cols = pred("live") + [select(c).select_from(src).scalar_subquery() for src, cs in zip(sources, parts) for c in cs]
     cols.append(select(func.count()).select_from(Game).where(Game.status == "final").scalar_subquery())
-    cols += [select(func.count()).select_from(t).scalar_subquery() for t in (LockedGame, Top5Lock)]  # top 5 settled at tip-off
+    cols += [select(func.count()).select_from(t).scalar_subquery() for t in (LockedGame, Top5Lock)]  # top 5 settled
+    cols += [select(f).select_from(Top5Seen).scalar_subquery() for f in (func.count(), func.max(Top5Seen.last_seen_at))]  # top 5 log
     cols += pred("backtest")
     with SessionLocal() as s:
         row = tuple(s.execute(select(*cols)).one())
@@ -479,7 +481,7 @@ def _compute_picks(kind: str | None = None) -> pd.DataFrame:
       prob x payout - P(loss). Market prob: the book's no-vig chance for the same side.
     """
     df = _grade(_load(PlayerProp, kind=kind))
-    for col in ("top5", "top5_gap"):
+    for col in ("top5", "top5_gap", "locked", "locked_gap"):
         df[col] = False
     df["confidence_rank"] = df["gap_rank"] = np.nan
     return df[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True) if not df.empty else pd.DataFrame(columns=PICK_COLUMNS)
@@ -514,7 +516,17 @@ def _view(allp: pd.DataFrame, kind: str, phase: str, fp: tuple | None = None) ->
     if df.empty:
         return pd.DataFrame(columns=PICK_COLUMNS)
     locks = top5.load() if kind == "live" and phase == "final" else None
-    return _rank(df, locks)[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
+    return _with_locks(_rank(df, locks), locks)[PICK_COLUMNS].sort_values(["date", "player", "stat"]).reset_index(drop=True)
+
+
+def _with_locks(df: pd.DataFrame, locks: top5.Locks | None) -> pd.DataFrame:
+    """locked / locked_gap: the pick's top-5 slot (by confidence / by gap) is settled and can't change any more
+    (app.ml.top5). A top-5 pick that isn't locked is provisional."""
+    df = df.copy()
+    for col, method in (("locked", "confidence"), ("locked_gap", "gap")):
+        df[col] = [bool(locks) and (d, method, p, g, s) in locks.picks
+                   for d, p, g, s in zip(df["date"], df["player_id"], df["game_id"], df["stat"])]
+    return df
 
 
 def _record(g: pd.DataFrame) -> dict:
@@ -682,9 +694,54 @@ def _performance(kind: str, phase: str, fp: tuple | None = None) -> dict:
         "top5": {name: _strategy(df, flag, rank) for name, flag, rank in
                  (("gap", "top5_gap", "gap_rank"), ("confidence", "top5", "confidence_rank"))},
         "top_performers": top,
+        "top5_seen": _top5_seen(df, fp) if kind == "live" and phase == "final" else {m: [] for m in top5.METHODS},
         "top_summary": top_summary,
         "picks": _json_rows(df[df["result"] != "pending"]),
     })
+
+
+SEEN_COLUMNS = ["date", "game_id", "player_id", "player", "team", "opp", "stat", "pick", "line", "odds", "prob", "predicted",
+                "first_seen_at", "last_seen_at", "best_rank", "in_top5", "locked", "actual", "result", "units"]
+
+
+def _top5_seen(view: pd.DataFrame, fp: tuple | None = None) -> dict:
+    """Everyone who was in each night's top 5 at some point (top5_seen), graded at the line they were first shown at:
+    what a bet placed then got. `in_top5` says whether they're in it now, `locked` whether that's settled."""
+    seen = _cached(("top5_seen",), _load_seen, fp, LIVE)
+    out = {}
+    for method, (flag, _) in top5.METHODS.items():
+        g = seen[seen["method"] == method]
+        if g.empty:
+            out[method] = []
+            continue
+        lock_col = "locked" if method == "confidence" else "locked_gap"
+        now = view[["date", "player_id", "game_id", "stat", "player", "team", "opp", "actual", "result", flag, lock_col]].rename(
+            columns={"result": "now_result", flag: "in_top5", lock_col: "locked"})
+        g = g.merge(now, on=["date", "player_id", "game_id", "stat"], how="left")
+        g["in_top5"] = g["in_top5"].fillna(False).astype(bool)
+        g["locked"] = g["locked"].fillna(False).astype(bool)
+        over_hit, under_hit = g["actual"] > g["line"], g["actual"] < g["line"]
+        g["result"] = np.select(
+            [g["now_result"].isin(["pending"]) | g["now_result"].isna(), g["now_result"] == "void", g["actual"] == g["line"],
+             ((g["pick"] == "over") & over_hit) | ((g["pick"] == "under") & under_hit)],
+            ["pending", "void", "push", "win"], "loss")
+        pay = _payout(g["odds"].fillna(DEFAULT_ODDS))
+        g["units"] = np.select([g["result"] == "win", g["result"] == "loss"], [pay, -1.0], np.nan)
+        g["units"] = g["units"].round(4)
+        out[method] = _json_rows(g.sort_values(["date", "first_seen_at", "best_rank"], ascending=[False, True, True])[SEEN_COLUMNS])
+    return out
+
+
+def _load_seen() -> pd.DataFrame:
+    with SessionLocal() as s:
+        rows = s.execute(select(Top5Seen)).scalars().all()
+    df = pd.DataFrame([{
+        "date": r.game_date.isoformat(), "method": r.method, "player_id": r.player_id, "game_id": r.game_id, "stat": r.target,
+        "pick": r.pick, "line": r.line, "odds": r.odds, "prob": r.prob, "predicted": r.predicted, "best_rank": r.best_rank,
+        "first_seen_at": r.first_seen_at.isoformat() + "Z", "last_seen_at": r.last_seen_at.isoformat() + "Z",
+    } for r in rows], columns=["date", "method", "player_id", "game_id", "stat", "pick", "line", "odds", "prob", "predicted",
+                               "best_rank", "first_seen_at", "last_seen_at"])
+    return df
 
 
 def _json_safe(v):

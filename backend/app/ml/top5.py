@@ -1,27 +1,34 @@
-"""Settle each night's top 5 as games tip off, so a pick that was in the top 5 when its game started stays there.
+"""Settle each night's top 5 game by game, so a pick shown as locked stays in the top 5 at the line shown.
 
-The final picks are frozen per game shortly before its own tip-off (jobs.daily --refresh --before-tip). Ranked
-afresh over the whole night, a late game's pick refreshed at 9:45 could push out an early game's pick that was in
-the top 5 when that game tipped at 7:00. Instead, at each tip-off the board is settled for the games that just
-started: their picks in the top 5 at that moment are locked in (`top5_locks`), their other picks drop out of
-contention (`locked_games`), and later games only compete for the slots still open. Nights with no locked games
+A game's picks are re-frozen by every refresh before its tip-off (jobs.daily --refresh --before-tip). At its last one
+(within LOCK_WITHIN of tip-off, or at tip-off if that refresh didn't run) the board is settled for that game: its
+picks in the top 5 at that moment are locked in (`top5_locks`), its other picks drop out of contention
+(`locked_games`), its snapshots are no longer rewritten, and later games only compete for the slots still open.
+Until then a game's picks in the top 5 are provisional: a later refresh can change them. Nights with no settled games
 (before this existed, and the morning page) are ranked over the whole night as before.
+
+Every board a run leaves behind is also logged (`top5_seen`), so a provisional pick that later dropped out is still on
+record, with the line it was shown at.
 """
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from app.db import SessionLocal, upsert
-from app.models import LockedGame, Top5Lock
+from app.db import SessionLocal, engine, upsert
+from app.models import LockedGame, Top5Lock, Top5Seen
 
 TOP_N = 5
 TOP_STAT = "pts"
 # method -> (top-5 flag column, rank column) in the graded picks
 METHODS = {"confidence": ("top5", "confidence_rank"), "gap": ("top5_gap", "gap_rank")}
+# A refresh this close to a game's tip-off is its last one (the refresh cron runs every 15 minutes), so it settles it.
+LOCK_WITHIN = timedelta(minutes=15)
 
 
 @dataclass
@@ -74,21 +81,28 @@ def load() -> Locks:
     return locks
 
 
-def lock_started(on: date, started: set[str]) -> tuple[int, int]:
-    """Settle the top 5 for games on `on` that have started since the last call. Run before a refresh re-freezes
-    anything, so the board is the one that stood at their tip-off. Returns (games settled, picks locked)."""
-    locks = load()
-    new = started - locks.games.get(on.isoformat(), set())
-    if not new:
-        return 0, 0
+def board(on: date, locks: Locks | None = None) -> pd.DataFrame:
+    """The night's live final-phase picks, graded and ranked the way the Performance page shows them."""
     from app.main import _grade, _load, _rank  # the Performance page's own grading and ranking
     from app.models import PickSnapshot
 
     snap = _load(PickSnapshot, "final", on=on)
+    if snap.empty:
+        return snap
+    df = _grade(snap)
+    return _rank(df[df["kind"] == "live"], locks if locks is not None else load())
+
+
+def settle(on: date, game_ids: set[str]) -> tuple[int, int]:
+    """Settle the top 5 for games on `on` not settled yet: lock their picks that are in the top 5 on the current board.
+    Returns (games settled, picks locked)."""
+    locks = load()
+    new = set(game_ids) - locks.games.get(on.isoformat(), set())
+    if not new:
+        return 0, 0
+    df = board(on, locks)
     rows = []
-    if not snap.empty:
-        df = _grade(snap)
-        df = _rank(df[df["kind"] == "live"], locks)
+    if not df.empty:
         for method, (flag, _) in METHODS.items():
             hit = df[df[flag].astype(bool) & df["game_id"].isin(new)]
             rows += [{"game_date": on, "method": method, "player_id": int(p), "game_id": g, "target": s}
@@ -96,3 +110,38 @@ def lock_started(on: date, started: set[str]) -> tuple[int, int]:
     upsert(Top5Lock.__table__, rows)
     upsert(LockedGame.__table__, [{"game_id": g, "game_date": on} for g in sorted(new)])
     return len(new), len(rows)
+
+
+def settled_games(on: date) -> set[str]:
+    return load().games.get(on.isoformat(), set())
+
+
+def record_seen(on: date, df: pd.DataFrame | None = None, now: datetime | None = None) -> int:
+    """Log every pick in the night's top 5 right now (both methods). A pick seen before keeps its first sighting (and
+    the line it was shown at); only its last sighting and best rank move."""
+    df = board(on) if df is None else df
+    if df is None or df.empty:
+        return 0
+    now = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
+    rows = []
+    for method, (flag, rank_col) in METHODS.items():
+        hit = df[df[flag].fillna(False).astype(bool)]
+        rows += [{"game_date": on, "method": method, "player_id": int(r.player_id), "game_id": r.game_id, "target": r.stat,
+                  "first_seen_at": now, "last_seen_at": now, "best_rank": int(getattr(r, rank_col)), "pick": r.pick,
+                  "line": float(r.line), "odds": _num(r.odds), "prob": _num(r.prob), "predicted": _num(r.predicted)}
+                 for r in hit.itertuples()]
+    if not rows:
+        return 0
+    t = Top5Seen.__table__
+    stmt = (pg_insert if engine.dialect.name == "postgresql" else sqlite_insert)(t).values(rows)
+    least = func.least if engine.dialect.name == "postgresql" else func.min
+    stmt = stmt.on_conflict_do_update(index_elements=[c.name for c in t.primary_key.columns],
+                                      set_={"last_seen_at": stmt.excluded.last_seen_at,
+                                            "best_rank": least(t.c.best_rank, stmt.excluded.best_rank)})
+    with engine.begin() as conn:
+        conn.execute(stmt)
+    return len(rows)
+
+
+def _num(v) -> float | None:
+    return None if v is None or pd.isna(v) else float(v)
