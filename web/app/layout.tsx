@@ -27,6 +27,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <Link href="/" className="font-semibold tracking-tight">
               Hoops Projections
             </Link>
+            <Link href="/picks" className="text-sm text-text-2 hover:text-text">
+              Picks
+            </Link>
             <Link href="/" className="text-sm text-text-2 hover:text-text">
               Slate
             </Link>
@@ -35,9 +38,6 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             </Link>
             <Link href="/performance" className="text-sm text-text-2 hover:text-text">
               Performance
-            </Link>
-            <Link href="/model" className="text-sm text-text-2 hover:text-text">
-              Model
             </Link>
             <Link href="/ab-test" className="text-sm text-text-2 hover:text-text">
               A/B test

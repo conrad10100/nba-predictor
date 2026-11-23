@@ -10,12 +10,12 @@ export function ModelView() {
   useEffect(() => { api.metrics().then(setM).catch((e) => setError(String(e.message ?? e))); }, []);
 
   if (error) return <p className="text-critical">{error}</p>;
-  if (!m) return <p className="text-text-2">Loading model…</p>;
+  if (!m) return <p className="text-text-2">Loading picks…</p>;
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Model</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Picks</h1>
         <p className="text-sm text-text-2">
           Retrained every morning. Accuracy below is on the most recent 3 weeks of games, which the model did not train on.
         </p>
