@@ -1,11 +1,6 @@
-import { Suspense } from "react";
+import { redirect } from "next/navigation";
 
-import { ModelView } from "@/components/ModelView";
-
+// The Model page was renamed to Picks; keep old links working.
 export default function ModelPage() {
-  return (
-    <Suspense fallback={<p className="text-text-2">Loading model…</p>}>
-      <ModelView />
-    </Suspense>
-  );
+  redirect("/picks");
 }
