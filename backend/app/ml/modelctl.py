@@ -6,6 +6,8 @@ python -m app.ml.modelctl pin <version> [target]     predict with this saved mod
 python -m app.ml.modelctl unpin [target]             back to the newest promoted model
 python -m app.ml.modelctl features on|off|auto [target]
     defender features: force on, force off, or let the weekly shadow test decide (the default)
+python -m app.ml.modelctl model hgb|xgboost|auto [target]
+    algorithm: force HistGradientBoosting or XGBoost, or let daily self-tuning pick (the default)
 python -m app.ml.modelctl shadow [target]            the shadow test: last weekly verdict and this week so far
 
 Every daily retrain is kept in model_runs, so any version listed can be pinned. A pin holds until unpinned; the
@@ -55,6 +57,7 @@ def status(targets: list[str]) -> None:
             fixed = (cfg.locked_params or {}) if cfg else {}
             champ = tuning.champion(t)
             print(f"{t}: predicting with {active_version(t)}{' (pinned)' if pinned else ' (newest promoted)'}; "
+                  f"algorithm {champ['model']}{' (forced)' if 'model' in fixed else ' (auto)'}; "
                   f"defender features {'on' if champ.get(SWITCH) else 'off'}"
                   f"{' (forced)' if SWITCH in fixed else ' (auto)'}")
 
@@ -97,6 +100,24 @@ def features(mode: str, targets: list[str]) -> None:
           + (" The shadow test is paused while forced." if mode != "auto" else ""))
 
 
+def model(mode: str, targets: list[str]) -> None:
+    if mode not in (*tuning.ALGORITHMS, "auto"):
+        sys.exit(f"model takes {', '.join(tuning.ALGORITHMS)} or auto")
+    with SessionLocal() as s:
+        for t in targets:
+            cfg = _config(s, t)
+            fixed = dict(cfg.locked_params or {})
+            fixed.pop("model", None)
+            if mode != "auto":
+                fixed["model"] = mode
+                cfg.params = {**(cfg.params or {}), "model": mode}
+            cfg.locked_params = fixed or None
+        s.commit()
+    print(f"Algorithm {mode} for {', '.join(targets)}; takes effect at the next retrain (python -m app.ml.train)."
+          + (" Each retrain still scores the other algorithm on the same holdout and logs it in the tuning note."
+             if mode != "auto" else ""))
+
+
 def main(argv: list[str]) -> None:
     init_db()  # adds the control columns on first use
     if not argv:
@@ -114,6 +135,8 @@ def main(argv: list[str]) -> None:
         from app.ml import shadow
 
         shadow.main(args[:1] or TARGETS)
+    elif cmd == "model" and args:
+        model(args[0], args[1:2] or TARGETS)
     elif cmd == "features" and args:
         features(args[0], args[1:2] or TARGETS)
     else:

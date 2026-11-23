@@ -17,6 +17,8 @@ DEFAULT = {"model": "hgb", "half_life_days": 365, "learning_rate": 0.08, "max_le
            # existing model stays champion until the version with them wins on recent games.
            "defender_features": 0}
 
+ALGORITHMS = ("hgb", "xgboost")
+
 # Variations around the default, one knob at a time; cycled through one per day.
 CANDIDATES = [
     {"minutes_weight": 1}, {"minutes_weight": 2},  # weight rotation players more (0 = every player counts the same)
@@ -48,6 +50,15 @@ def champion(target: str) -> dict:
     if params["model"] == "xgboost" and not xgb.AVAILABLE:
         params["model"] = "hgb"  # e.g. running locally on a Mac without libomp
     return params
+
+
+def reference(target: str, current: dict) -> dict | None:
+    """When the algorithm is forced by hand, the champion settings on the other algorithm: scored on the same
+    holdout every retrain so the tuning note keeps an HGB-vs-XGBoost comparison, but never allowed to take over."""
+    if "model" not in locked(target) or not xgb.AVAILABLE:
+        return None
+    other = next(a for a in ALGORITHMS if a != current["model"])
+    return {**current, "model": other}
 
 
 def challenger(target: str, current: dict, on: date) -> dict:

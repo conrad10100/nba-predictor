@@ -105,6 +105,10 @@ def train_target(rows: pd.DataFrame, target: str, version: str) -> dict:
         results.append(f"{_diff(champ, chall)} {c_focus:.3f}")
         if c_focus < champ_focus * (1 - tuning.MIN_IMPROVEMENT) and c_focus < best_focus:
             params, point, mae, best_focus = chall, c_model, c_mae, c_focus
+    ref = tuning.reference(target, champ)
+    if ref is not None:  # algorithm forced by hand: log the other one on the same holdout, but it can't take over
+        r_focus, _, _ = _score(ref, train, hold, target, focus)
+        results.append(f"reference model={ref['model']} {r_focus:.3f}")
     if params is champ:
         note = f"champion kept: {judged} {champ_focus:.3f} vs challengers " + "; ".join(results)
     else:
