@@ -488,6 +488,8 @@ def _compute_picks(kind: str | None = None) -> pd.DataFrame:
 
 
 PHASES = ("morning", "final")
+# Only the after-injury view has a page now; the morning view is still served on request but not kept warm.
+WARM_PHASES = ("final",)
 
 
 def _snapshots(phase: str, fp: tuple) -> pd.DataFrame:
@@ -618,7 +620,7 @@ def _json_rows(df: pd.DataFrame) -> list[dict]:
 
 @app.get("/api/performance")
 def performance(request: Request, kind: str = Query("live", pattern="^(live|backtest)$"),
-                phase: str = Query("morning", pattern="^(morning|final)$")):
+                phase: str = Query("final", pattern="^(morning|final)$")):
     """Over/under record, units and EV of the model's picks against DraftKings player props: all picks, each night's
     top 5 player-points picks (by biggest gap from the line and by confidence), and each night's top 5 performers."""
     key = ("performance", kind, phase)
@@ -642,7 +644,7 @@ def _refresh_performance():
     """Rebuild any Performance view whose data changed (or that is older than DATA_TTL_S). Visitors keep getting the
     previous copy until the new one is ready."""
     fp = _fingerprint()
-    for phase in PHASES:
+    for phase in WARM_PHASES:
         for kind in ("live", "backtest"):
             _cached(("performance", kind, phase), lambda k=kind, p=phase: _encode(_performance(k, p, fp)), fp)
 

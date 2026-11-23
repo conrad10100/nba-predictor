@@ -6,7 +6,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { LineChart } from "@/components/LineChart";
 import {
   api, fmt, performanceExportUrl, STAT_LABEL, TARGETS,
-  type Kind, type Performance, type Pick as PickRow, type PickResult, type SeenPick, type Phase, type Record_, type RunningRow, type StatKey, type Target, type Top5Method,
+  type Kind, type Performance, type Pick as PickRow, type PickResult, type SeenPick, type Phase, type Record_, type RunningRow, type StatKey, type Top5Method,
 } from "@/lib/api";
 
 // At standard -110 juice you need to win 110/210 of decided picks to break even.
@@ -45,42 +45,31 @@ function WinPct({ value, className = "" }: { value: number | null; className?: s
   return <span className={`${value >= BREAK_EVEN ? "text-good" : "text-critical"} ${className}`}>{(value * 100).toFixed(1)}%</span>;
 }
 
-const PHASE: Record<Phase, { title: string; about: string; other: { href: string; label: string }; provisional: string }> = {
-  morning: {
-    title: "Performance vs. DraftKings: morning picks",
-    about: "Picks as they stood after the morning run (about 5am ET), before the evening injury update.",
-    other: { href: "/performance/after-injuries", label: "Compare with picks after each game's last injury update →" },
-    provisional: "Locked at the morning run. Once a game tips off its picks can't change, and lines DraftKings posts later never count.",
-  },
-  final: {
-    title: "Performance vs. DraftKings: after the injury update",
-    about: "Picks as they stood after each game's last injury update, taken within 15 minutes of its tip-off.",
-    other: { href: "/performance", label: "← Compare with the morning picks" },
-    provisional: "Locked picks are settled at their game's last injury update (within 15 minutes of tip-off) and keep their slot and line for good. Provisional picks can still change or drop out until then, so bet a pick once it shows Locked.",
-  },
-};
+// Picks are graded as they stood after each game's last injury update (the "final" snapshot), not the morning run.
+const PHASE: Phase = "final";
+const PROVISIONAL = "Locked picks are settled at their game's last injury update (within 15 minutes of tip-off) and keep their slot and line for good. Provisional picks can still change or drop out until then, so bet a pick once it shows Locked.";
 
-export function PerformanceView({ phase = "morning" }: { phase?: Phase }) {
+export function PerformanceView() {
   const [kind, setKind] = useState<Kind | null>(null);
   const [data, setData] = useState<Partial<Record<Kind, Performance>>>({});
   const [error, setError] = useState<string | null>(null);
 
   // Open on live picks once there are any (including tonight's pending top 5); until then the backtest is the only history.
   useEffect(() => {
-    api.performance("live", phase)
+    api.performance("live", PHASE)
       .then((live) => {
         setData((d) => ({ ...d, live }));
         const hasLive = live.available.live > 0 || live.top5.gap.picks.length > 0;
         setKind(hasLive || live.available.backtest === 0 ? "live" : "backtest");
       })
       .catch((e) => setError(String(e.message ?? e)));
-  }, [phase]);
+  }, []);
 
   useEffect(() => {
     if (kind && !data[kind]) {
-      api.performance(kind, phase).then((p) => setData((d) => ({ ...d, [kind]: p }))).catch((e) => setError(String(e.message ?? e)));
+      api.performance(kind, PHASE).then((p) => setData((d) => ({ ...d, [kind]: p }))).catch((e) => setError(String(e.message ?? e)));
     }
-  }, [kind, data, phase]);
+  }, [kind, data]);
 
   const perf = kind ? data[kind] : undefined;
   if (error) return <p className="text-critical">{error}</p>;
@@ -91,10 +80,9 @@ export function PerformanceView({ phase = "morning" }: { phase?: Phase }) {
     <div className="space-y-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold tracking-tight">{PHASE[phase].title}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Performance vs. DraftKings</h1>
           <p className="text-sm text-text-2">
-            {PHASE[phase].about}{" "}
-            <Link href={PHASE[phase].other.href} className="text-accent underline">{PHASE[phase].other.label}</Link>
+            Picks as they stood after each game&apos;s last injury update, taken within 15 minutes of its tip-off.
           </p>
           <p className="mt-1 text-sm text-text-2">
             Every player prop line on DraftKings becomes a pick: <strong>over</strong> when the model predicts more than the line,
@@ -133,7 +121,7 @@ export function PerformanceView({ phase = "morning" }: { phase?: Phase }) {
         </p>
       ) : (
         <>
-          <ConfidentSection perf={perf} provisional={PHASE[phase].provisional} />
+          <ConfidentSection perf={perf} provisional={PROVISIONAL} />
           {perf.picks.length > 0 && (
             <>
               <section className="space-y-3">
@@ -142,18 +130,14 @@ export function PerformanceView({ phase = "morning" }: { phase?: Phase }) {
                   {STATS.map((s) => perf.totals[s] && <RecordCard key={s} label={STAT_NAME[s]} record={perf.totals[s]!} />)}
                 </div>
               </section>
-              <RunningTally rows={perf.running} title="Running tally, every prop pick" byStat />
-              <div className="grid gap-4 lg:grid-cols-2">
-                <BucketTable
-                  title="By model confidence"
-                  note="does a more confident pick win more often?"
-                  first="Confidence"
-                  rows={perf.by_confidence}
-                  showAvgProb
-                />
-                <BucketTable title="By edge" note="distance between prediction and line" first="Edge" rows={perf.by_edge} />
-              </div>
-              <TopPerformers perf={perf} />
+              <WinRateChart rows={perf.running} />
+              <BucketTable
+                title="By model confidence"
+                note="does a more confident pick win more often?"
+                first="Confidence"
+                rows={perf.by_confidence}
+                showAvgProb
+              />
               <PicksTable picks={perf.picks} noPick={perf.no_pick} />
             </>
           )}
@@ -426,61 +410,56 @@ function NightSummary({ rows }: { rows: { result: PickResult; units: number | nu
   );
 }
 
-function RunningTally({ rows, title, byStat = false }: { rows: RunningRow[]; title: string; byStat?: boolean }) {
+/** Running win rate of every prop pick against break-even. */
+function WinRateChart({ rows }: { rows: RunningRow[] }) {
   const all = rows.filter((r) => r.stat === "all");
   const dates = all.map((r) => r.date);
+  if (dates.length < 2) return null;
   return (
-    <section className="space-y-4">
-      {byStat && dates.length >= 2 && (
-        <LineChart
-          title="Running win rate, every prop pick"
-          xLabels={dates.map(short)}
-          series={[
-            { key: "all", label: "Model", color: "var(--series-1)", values: all.map((r) => (r.win_pct == null ? null : r.win_pct * 100)), markers: dates.length < 30 },
-            { key: "be", label: "B/E", color: "var(--muted)", dashed: true, values: dates.map(() => BREAK_EVEN * 100) },
-          ]}
-          format={(v) => `${v.toFixed(0)}%`}
-        />
-      )}
-      <div className="overflow-x-auto rounded-lg border border-border bg-surface">
-        <div className="border-b border-border px-4 py-2.5 text-sm font-medium">{title}</div>
-        <div className="max-h-[360px] overflow-auto">
-          <table className="w-full min-w-[640px] text-sm">
-            <thead className="sticky top-0 bg-surface text-left text-xs text-text-2">
-              <tr className="border-b border-border">
-                <th className="px-4 py-2 font-medium">Night</th>
-                <th className="px-3 py-2 text-right font-medium">That night</th>
-                {byStat && TARGETS.map((t) => <th key={t} className="px-3 py-2 text-right font-medium">{STAT_LABEL[t]}</th>)}
-                <th className="px-3 py-2 text-right font-medium">Night units</th>
-                <th className="px-3 py-2 text-right font-medium">Running record</th>
-                <th className="px-3 py-2 text-right font-medium">Win %</th>
-                <th className="px-3 py-2 text-right font-medium">Running units</th>
-                <th className="px-4 py-2 text-right font-medium">Expected</th>
+    <LineChart
+      title="Running win rate, every prop pick"
+      xLabels={dates.map(short)}
+      series={[
+        { key: "all", label: "Model", color: "var(--series-1)", values: all.map((r) => (r.win_pct == null ? null : r.win_pct * 100)), markers: dates.length < 30 },
+        { key: "be", label: "B/E", color: "var(--muted)", dashed: true, values: dates.map(() => BREAK_EVEN * 100) },
+      ]}
+      format={(v) => `${v.toFixed(0)}%`}
+    />
+  );
+}
+
+function RunningTally({ rows, title }: { rows: RunningRow[]; title: string }) {
+  const all = rows.filter((r) => r.stat === "all");
+  return (
+    <section className="overflow-x-auto rounded-lg border border-border bg-surface">
+      <div className="border-b border-border px-4 py-2.5 text-sm font-medium">{title}</div>
+      <div className="max-h-[360px] overflow-auto">
+        <table className="w-full min-w-[640px] text-sm">
+          <thead className="sticky top-0 bg-surface text-left text-xs text-text-2">
+            <tr className="border-b border-border">
+              <th className="px-4 py-2 font-medium">Night</th>
+              <th className="px-3 py-2 text-right font-medium">That night</th>
+              <th className="px-3 py-2 text-right font-medium">Night units</th>
+              <th className="px-3 py-2 text-right font-medium">Running record</th>
+              <th className="px-3 py-2 text-right font-medium">Win %</th>
+              <th className="px-3 py-2 text-right font-medium">Running units</th>
+              <th className="px-4 py-2 text-right font-medium">Expected</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...all].reverse().map((r) => (
+              <tr key={r.date} className="border-b border-border/60 last:border-0">
+                <td className="px-4 py-1.5">{r.date}</td>
+                <td className="num px-3 py-1.5 text-right">{recordText({ wins: r.day_wins, losses: r.day_losses, pushes: r.day_pushes })}</td>
+                <td className="px-3 py-1.5 text-right"><Units value={r.day_units} /></td>
+                <td className="num px-3 py-1.5 text-right font-medium">{recordText(r)}</td>
+                <td className="num px-3 py-1.5 text-right"><WinPct value={r.win_pct} /></td>
+                <td className="px-3 py-1.5 text-right font-medium"><Units value={r.units} /></td>
+                <td className="px-4 py-1.5 text-right"><Units value={r.expected_units} /></td>
               </tr>
-            </thead>
-            <tbody>
-              {[...all].reverse().map((r) => (
-                <tr key={r.date} className="border-b border-border/60 last:border-0">
-                  <td className="px-4 py-1.5">{r.date}</td>
-                  <td className="num px-3 py-1.5 text-right">{recordText({ wins: r.day_wins, losses: r.day_losses, pushes: r.day_pushes })}</td>
-                  {byStat && TARGETS.map((t) => {
-                    const c = rows.find((x) => x.date === r.date && x.stat === t);
-                    return (
-                      <td key={t} className="num px-3 py-1.5 text-right text-text-2">
-                        {c ? recordText({ wins: c.day_wins, losses: c.day_losses, pushes: c.day_pushes }) : "–"}
-                      </td>
-                    );
-                  })}
-                  <td className="px-3 py-1.5 text-right"><Units value={r.day_units} /></td>
-                  <td className="num px-3 py-1.5 text-right font-medium">{recordText(r)}</td>
-                  <td className="num px-3 py-1.5 text-right"><WinPct value={r.win_pct} /></td>
-                  <td className="px-3 py-1.5 text-right font-medium"><Units value={r.units} /></td>
-                  <td className="px-4 py-1.5 text-right"><Units value={r.expected_units} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            ))}
+          </tbody>
+        </table>
       </div>
     </section>
   );
@@ -539,62 +518,6 @@ function PlayerCell({ p }: { p: { player_id: number; player: string | null; team
       <Link href={`/player/${p.player_id}`} className="hover:underline">{p.player ?? p.player_id}</Link>
       <span className="ml-1.5 text-xs text-muted">{p.team}{p.opp ? ` vs ${p.opp}` : ""}</span>
     </>
-  );
-}
-
-function TopPerformers({ perf }: { perf: Performance }) {
-  const dates = useMemo(() => [...new Set(perf.top_performers.map((r) => r.date))].sort().reverse(), [perf]);
-  const [date, setDate] = useState<string | null>(null);
-  const [stat, setStat] = useState<Target>("pts");
-  const shown = date && dates.includes(date) ? date : dates[0];
-  const rows = perf.top_performers.filter((r) => r.date === shown && r.stat === stat);
-  const inTop5 = rows.filter((r) => r.model_rank != null && r.model_rank <= 5).length;
-  const count = (r: PickResult) => rows.filter((x) => x.result === r).length;
-
-  if (!dates.length) return null;
-  return (
-    <section className="rounded-lg border border-border bg-surface">
-      <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2.5">
-        <span className="text-sm font-medium">Top 5 performers of the night</span>
-        <select value={shown} onChange={(e) => setDate(e.target.value)} className="rounded-md border border-border bg-bg px-2 py-1 text-sm" aria-label="Night">
-          {dates.map((d) => <option key={d} value={d}>{d}</option>)}
-        </select>
-        <Toggle value={stat} onChange={setStat} options={TARGETS.map((t) => ({ value: t, label: STAT_LABEL[t] }))} />
-      </div>
-      <p className="px-4 pt-3 text-sm text-text-2">
-        The night&apos;s actual top 5 in {STAT_LABEL[stat].toLowerCase()}. The model had <strong className="text-text">{inTop5} of 5</strong> in
-        its own projected top 5; against the line it went{" "}
-        <strong className="text-text">{count("win")}–{count("loss")}{count("push") ? `–${count("push")}` : ""}</strong>.
-      </p>
-      <div className="overflow-x-auto">
-        <table className="mt-2 w-full min-w-[640px] text-sm">
-          <thead className="text-left text-xs text-text-2">
-            <tr className="border-y border-border">
-              <th className="px-4 py-2 font-medium">#</th>
-              <th className="px-3 py-2 font-medium">Player</th>
-              <th className="px-3 py-2 text-right font-medium">Actual</th>
-              <th className="px-3 py-2 text-right font-medium">Model</th>
-              <th className="px-3 py-2 text-right font-medium">Model rank</th>
-              <th className="px-3 py-2 font-medium">Model pick</th>
-              <th className="px-4 py-2 font-medium">Result</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.player_id} className="border-b border-border/60 last:border-0">
-                <td className="num px-4 py-1.5 text-text-2">{r.rank}</td>
-                <td className="px-3 py-1.5"><PlayerCell p={{ ...r, opp: null }} /></td>
-                <td className="num px-3 py-1.5 text-right font-medium">{r.actual}</td>
-                <td className="num px-3 py-1.5 text-right">{fmt(r.predicted)}</td>
-                <td className="num px-3 py-1.5 text-right">{r.model_rank == null ? "–" : `#${r.model_rank}`}</td>
-                <td className="num px-3 py-1.5"><PickText pick={r.pick} line={r.line} /></td>
-                <td className="px-4 py-1.5"><ResultBadge result={r.result} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
   );
 }
 
