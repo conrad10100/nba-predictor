@@ -1,11 +1,6 @@
-import { Suspense } from "react";
+import { redirect } from "next/navigation";
 
-import { PerformanceView } from "@/components/PerformanceView";
-
+// The before and after injury pages were merged; /performance is now the after-injury view.
 export default function PerformanceAfterInjuriesPage() {
-  return (
-    <Suspense fallback={<p className="text-text-2">Loading performance…</p>}>
-      <PerformanceView phase="final" />
-    </Suspense>
-  );
+  redirect("/performance");
 }

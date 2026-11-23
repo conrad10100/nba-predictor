@@ -36,9 +36,6 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <Link href="/performance" className="text-sm text-text-2 hover:text-text">
               Performance
             </Link>
-            <Link href="/performance/after-injuries" className="text-sm text-text-2 hover:text-text">
-              After injuries
-            </Link>
             <Link href="/model" className="text-sm text-text-2 hover:text-text">
               Model
             </Link>
