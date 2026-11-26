@@ -80,7 +80,7 @@ export function PerformanceView() {
     <div className="space-y-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="max-w-3xl">
-          <h1 className="text-2xl font-semibold tracking-tight">Performance vs. DraftKings</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Predictions vs. DraftKings</h1>
           <p className="text-sm text-text-2">
             Picks as they stood after each game&apos;s last injury update, taken within 15 minutes of its tip-off.
           </p>
