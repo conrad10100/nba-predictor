@@ -5,11 +5,12 @@ pre-game prediction run stores its predictions in `shadow_predictions`, apart fr
 Performance page and grading never see them. Once a week (the first morning run 7+ days after the test started),
 both are compared on the games played since, using the same players and the same final pre-game run:
 
-- average miss on players with a DraftKings line (decides), and on everyone
-- over/under hit rate against the DraftKings line (shown for reference)
+- over/under hit rate against the DraftKings line (decides: over when the prediction is above the line; pushes
+  and predictions exactly on the line don't count)
+- average miss on players with a DraftKings line, and on everyone (shown for reference)
 
-The shadow takes over only if its average miss on DraftKings-line players is at least 0.5% lower, over at least
-MIN_LINE_PREDICTIONS predictions; otherwise the live setup stays. Either way a new week starts with the champion's
+The shadow takes over only if its over/under hit rate is at least MIN_HIT_RATE_GAIN higher (in percentage
+points), over at least MIN_LINE_PREDICTIONS predictions; otherwise the live setup stays. Either way a new week starts with the champion's
 setting flipped again as the shadow, so the comparison keeps running.
 
 python -m app.ml.shadow [target]    show the current week's comparison so far
@@ -30,6 +31,7 @@ from app.models import ModelConfig, PlayerProp, Prediction, ShadowModel, ShadowP
 
 WEEK_DAYS = 7
 MIN_LINE_PREDICTIONS = 150  # need this many graded predictions with DraftKings lines before deciding
+MIN_HIT_RATE_GAIN = 0.01  # the shadow's over/under hit rate must beat the live one by 1+ percentage point
 
 
 def save_predictions(rows: pd.DataFrame, on: date, targets: list[str]) -> int:
@@ -88,19 +90,27 @@ def compare(target: str, start: date, end: date) -> dict:
             out[f"{who}_hit_rate"] = _hit_rate(lines[who], lines["line"], lines["actual"])
     days = []
     for d, g in lines.groupby("game_date"):
-        days.append({"date": pd.Timestamp(d).date().isoformat(), "n_lines": len(g),
-                     "live_mae_lines": float((g["live"] - g["actual"]).abs().mean()),
-                     "shadow_mae_lines": float((g["shadow"] - g["actual"]).abs().mean())})
+        day = {"date": pd.Timestamp(d).date().isoformat(), "n_lines": len(g),
+               "live_mae_lines": float((g["live"] - g["actual"]).abs().mean()),
+               "shadow_mae_lines": float((g["shadow"] - g["actual"]).abs().mean())}
+        for who in ("live", "shadow"):
+            day[f"{who}_wins"], day[f"{who}_graded"] = _record(g[who], g["line"], g["actual"])
+        days.append(day)
     out["days"] = days
     return out
 
 
-def _hit_rate(pred: pd.Series, line: pd.Series, actual: pd.Series) -> float | None:
-    """Share of over/under picks (over when the prediction is above the line) that won; pushes and no-picks excluded."""
+def _record(pred: pd.Series, line: pd.Series, actual: pd.Series) -> tuple[int, int]:
+    """(wins, graded) for over/under picks: over when the prediction is above the line; pushes and no-picks excluded."""
     pick = np.sign(pred - line)
     result = np.sign(actual - line)
     graded = (pick != 0) & (result != 0)
-    return float((pick[graded] == result[graded]).mean()) if graded.any() else None
+    return int((pick[graded] == result[graded]).sum()), int(graded.sum())
+
+
+def _hit_rate(pred: pd.Series, line: pd.Series, actual: pd.Series) -> float | None:
+    wins, graded = _record(pred, line, actual)
+    return wins / graded if graded else None
 
 
 def describe(r: dict) -> str:
@@ -110,9 +120,9 @@ def describe(r: dict) -> str:
 
     def pct(v):
         return "n/a" if v is None else f"{v:.1%}"
-    return (f"{r['target']} {r['start']}..{r['end']}, shadow {switch}: avg miss on {r['n_lines']} DraftKings-line predictions "
-            f"live {r['live_mae_lines']:.3f} vs shadow {r['shadow_mae_lines']:.3f}; over/under hit rate live "
-            f"{pct(r['live_hit_rate'])} vs shadow {pct(r['shadow_hit_rate'])}; all {r['n']}: {r['live_mae']:.3f} vs {r['shadow_mae']:.3f}")
+    return (f"{r['target']} {r['start']}..{r['end']}, shadow {switch}: over/under hit rate on {r['n_lines']} DraftKings lines "
+            f"live {pct(r['live_hit_rate'])} vs shadow {pct(r['shadow_hit_rate'])}; avg miss live {r['live_mae_lines']:.3f} vs "
+            f"shadow {r['shadow_mae_lines']:.3f}; all {r['n']}: {r['live_mae']:.3f} vs {r['shadow_mae']:.3f}")
 
 
 def weekly_decision(today: date) -> list[str]:
@@ -128,7 +138,8 @@ def weekly_decision(today: date) -> list[str]:
         if r.get("n_lines", 0) < MIN_LINE_PREDICTIONS:
             notes.append(f"{describe(r)} -> not enough graded predictions yet, extending the test")
             continue
-        won = r["shadow_mae_lines"] < r["live_mae_lines"] * (1 - tuning.MIN_IMPROVEMENT)
+        a, b = r.get("live_hit_rate"), r.get("shadow_hit_rate")
+        won = a is not None and b is not None and b >= a + MIN_HIT_RATE_GAIN
         if won:
             for key, value in r.get("shadow_params", {}).items():
                 tuning.set_switch(target, key, int(value), "shadow test")
@@ -170,7 +181,7 @@ def report(today: date) -> dict:
                                                                 "live_hit_rate", "shadow_hit_rate", "live_mae", "shadow_mae")}}
                              for v in verdicts],
             }
-    return {"min_improvement": tuning.MIN_IMPROVEMENT, "min_line_predictions": MIN_LINE_PREDICTIONS, "week_days": WEEK_DAYS,
+    return {"min_hit_rate_gain": MIN_HIT_RATE_GAIN, "min_line_predictions": MIN_LINE_PREDICTIONS, "week_days": WEEK_DAYS,
             "stats": out}
 
 

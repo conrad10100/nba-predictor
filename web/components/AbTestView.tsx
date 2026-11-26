@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { LineChart } from "@/components/LineChart";
-import { api, fmt, pct, STAT_LABEL, TARGETS, type AbResult, type AbStat, type AbTest } from "@/lib/api";
+import { api, fmt, STAT_LABEL, TARGETS, type AbResult, type AbStat, type AbTest } from "@/lib/api";
 
 const SWITCH_LABEL: Record<string, [string, string]> = {
   defender_features: ["Without defender ratings", "With defender ratings"],
@@ -37,32 +37,41 @@ export function AbTestView() {
         <p className="max-w-3xl text-sm text-text-2">
           The live model (A) makes your picks. A shadow model (B), the same model with one feature set flipped, predicts every
           slate alongside it without affecting picks. After {data.week_days} days both are compared on the same real games: B takes
-          over only if its average miss on players with a DraftKings line is at least {(data.min_improvement * 100).toFixed(1)}% lower,
-          over at least {data.min_line_predictions} predictions. Then a new week starts.
+          over only if its over/under hit rate against the DraftKings line is at least {(data.min_hit_rate_gain * 100).toFixed(0)} point
+          higher, over at least {data.min_line_predictions} lines (pushes and predictions exactly on the line don&apos;t count). Then a new
+          week starts.
         </p>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
         {TARGETS.map((t) => {
           const s = data.stats[t];
-          return s ? <StatCard key={t} target={t} s={s} minImprovement={data.min_improvement} minLines={data.min_line_predictions} weekDays={data.week_days} /> : null;
+          return s ? <StatCard key={t} target={t} s={s} minGain={data.min_hit_rate_gain} minLines={data.min_line_predictions} weekDays={data.week_days} /> : null;
         })}
       </div>
 
       <section className="grid gap-4 lg:grid-cols-3">
         {TARGETS.map((t) => {
           const days = data.stats[t]?.week?.days ?? [];
-          if (days.length < 2) return null;
+          if (days.length < 2 || days[0].live_graded == null) return null;
+          const running = (who: "live" | "shadow") => {
+            let w = 0, g = 0;
+            return days.map((d) => {
+              w += d[`${who}_wins`] ?? 0;
+              g += d[`${who}_graded`] ?? 0;
+              return g ? (w / g) * 100 : null;
+            });
+          };
           return (
             <LineChart
               key={t}
-              title={`${STAT_LABEL[t]}: average miss per night, line players`}
+              title={`${STAT_LABEL[t]}: over/under hit rate so far this week`}
               xLabels={days.map((d) => d.date.slice(5).replace("-", "/"))}
               series={[
-                { key: "a", label: "A", color: "var(--series-1)", values: days.map((d) => d.live_mae_lines), markers: true },
-                { key: "b", label: "B", color: "var(--series-2)", values: days.map((d) => d.shadow_mae_lines), markers: true },
+                { key: "a", label: "A", color: "var(--series-1)", values: running("live"), markers: true },
+                { key: "b", label: "B", color: "var(--series-2)", values: running("shadow"), markers: true },
               ]}
-              format={(v) => v.toFixed(2)}
+              format={(v) => `${v.toFixed(0)}%`}
             />
           );
         })}
@@ -80,8 +89,8 @@ export function AbTestView() {
                 <th className="px-3 py-2 font-medium">Stat</th>
                 <th className="px-3 py-2 font-medium">B (shadow)</th>
                 <th className="px-3 py-2 text-right font-medium">Lines</th>
-                <th className="px-3 py-2 text-right font-medium">Avg miss A / B</th>
                 <th className="px-3 py-2 text-right font-medium">Over/under hit A / B</th>
+                <th className="px-3 py-2 text-right font-medium">Avg miss A / B</th>
                 <th className="px-4 py-2 text-right font-medium">Result</th>
               </tr>
             </thead>
@@ -92,8 +101,8 @@ export function AbTestView() {
                   <td className="px-3 py-1.5">{STAT_LABEL[v.target]}</td>
                   <td className="px-3 py-1.5 text-text-2">{setupLabel(v.shadow_params)}</td>
                   <td className="num px-3 py-1.5 text-right">{v.n_lines}</td>
-                  <td className="num px-3 py-1.5 text-right">±{fmt(v.live_mae_lines, 2)} / ±{fmt(v.shadow_mae_lines, 2)}</td>
-                  <td className="num px-3 py-1.5 text-right">{pct(v.live_hit_rate)} / {pct(v.shadow_hit_rate)}</td>
+                  <td className="num px-3 py-1.5 text-right">{pct1(v.live_hit_rate)} / {pct1(v.shadow_hit_rate)}</td>
+                  <td className="num px-3 py-1.5 text-right text-text-2">±{fmt(v.live_mae_lines, 2)} / ±{fmt(v.shadow_mae_lines, 2)}</td>
                   <td className={`px-4 py-1.5 text-right text-xs ${v.switched ? "text-good" : "text-text-2"}`}>
                     {v.switched ? "B won, switched" : "A kept"}
                   </td>
@@ -107,15 +116,16 @@ export function AbTestView() {
   );
 }
 
-function StatCard({ target, s, minImprovement, minLines, weekDays }: {
-  target: (typeof TARGETS)[number]; s: AbStat; minImprovement: number; minLines: number; weekDays: number;
+function StatCard({ target, s, minGain, minLines, weekDays }: {
+  target: (typeof TARGETS)[number]; s: AbStat; minGain: number; minLines: number; weekDays: number;
 }) {
   const w = s.week;
   const today = new Date().toISOString().slice(0, 10);
   const day = s.since ? Math.min(weekDays, daysBetween(s.since, today) + 1) : 0;
-  const a = w?.live_mae_lines;
-  const b = w?.shadow_mae_lines;
-  const diff = a != null && b != null && a > 0 ? (a - b) / a : null; // > 0: B misses less
+  const a = w?.live_hit_rate;
+  const b = w?.shadow_hit_rate;
+  const diff = a != null && b != null ? b - a : null; // > 0: B wins more often
+  const pts = (v: number) => `${(Math.abs(v) * 100).toFixed(1)} pt${Math.abs(v) * 100 === 1 ? "" : "s"}`;
   let status = "Waiting for graded games";
   let tone = "text-text-2";
   if (s.locked.length) {
@@ -124,13 +134,15 @@ function StatCard({ target, s, minImprovement, minLines, weekDays }: {
     status = "Starts with the next prediction run";
   } else if (diff != null) {
     const enough = (w?.n_lines ?? 0) >= minLines;
-    if (diff >= minImprovement) {
-      status = `B ahead by ${(diff * 100).toFixed(1)}%${enough ? "" : ` (needs ${minLines}+ lines)`}`;
+    if (diff >= minGain) {
+      status = `B ahead by ${pts(diff)}${enough ? "" : ` (needs ${minLines}+ lines)`}`;
       tone = "text-good";
     } else if (diff > 0) {
-      status = `B ahead by ${(diff * 100).toFixed(1)}%, under the ${(minImprovement * 100).toFixed(1)}% bar`;
+      status = `B ahead by ${pts(diff)}, under the ${(minGain * 100).toFixed(0)}-point bar`;
+    } else if (diff < 0) {
+      status = `A ahead by ${pts(diff)}`;
     } else {
-      status = `A ahead by ${(-diff * 100).toFixed(1)}%`;
+      status = "Tied";
     }
   }
 
@@ -162,9 +174,13 @@ function Side({ label, setup, r, who, color }: { label: string; setup: string; r
         {label}
       </div>
       <div className="mt-0.5 text-xs text-text-2">{setup}</div>
-      <div className="num mt-2 text-2xl font-semibold">{mae == null ? "–" : `±${mae.toFixed(2)}`}</div>
-      <div className="text-xs text-text-2">avg miss, line players</div>
-      <div className="num mt-1 text-sm">{pct(hit)} <span className="text-xs text-text-2">over/under hit</span></div>
+      <div className="num mt-2 text-2xl font-semibold">{pct1(hit)}</div>
+      <div className="text-xs text-text-2">over/under hit rate</div>
+      <div className="num mt-1 text-sm">{mae == null ? "–" : `±${mae.toFixed(2)}`} <span className="text-xs text-text-2">avg miss</span></div>
     </div>
   );
+}
+
+function pct1(v: number | null | undefined) {
+  return v == null ? "–" : `${(v * 100).toFixed(1)}%`;
 }
