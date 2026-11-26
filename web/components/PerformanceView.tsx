@@ -28,6 +28,16 @@ function Units({ value, className = "" }: { value: number | null | undefined; cl
   return <span className={`num ${cls} ${className}`}>{v > 0 ? "+" : ""}{v.toFixed(2)}u</span>;
 }
 
+/** Return on investment: units won per unit risked. Each graded pick (win, loss or push) risks 1 unit. */
+const roiOf = (units: number, risked: number) => (risked ? units / risked : null);
+
+function Roi({ value, className = "" }: { value: number | null | undefined; className?: string }) {
+  if (value == null) return <span className={`text-muted ${className}`}>–</span>;
+  const v = Math.abs(value) < 0.0005 ? 0 : value;
+  const cls = v > 0 ? "text-good" : v < 0 ? "text-critical" : "text-text-2";
+  return <span className={`num ${cls} ${className}`}>{v > 0 ? "+" : ""}{(v * 100).toFixed(1)}%</span>;
+}
+
 /** Closing line value: did the line move toward the side the model took against the opening line? */
 function ClvText({ r }: { r: Pick<Record_, "clv_n" | "clv_avg" | "clv_toward" | "clv_away"> }) {
   if (!r.clv_n || r.clv_avg == null) return <span className="text-muted">–</span>;
@@ -182,7 +192,7 @@ function RecordCard({ label, record }: { label: string; record: Record_ }) {
       <dl className="num mt-2 grid grid-cols-2 gap-y-0.5 text-sm">
         <dt className="text-text-2">Win rate</dt><dd className="text-right"><WinPct value={record.win_pct} /></dd>
         <dt className="text-text-2">Units</dt><dd className="text-right"><Units value={record.units} /></dd>
-        <dt className="text-text-2">ROI</dt><dd className="text-right">{pctText(record.roi, 1)}</dd>
+        <dt className="text-text-2">ROI</dt><dd className="text-right"><Roi value={record.roi} /></dd>
         <dt className="text-text-2">Expected (EV)</dt><dd className="text-right"><Units value={record.expected_units} /></dd>
         <dt className="col-span-2 mt-1 text-xs text-text-2">Line move after open (CLV)</dt>
         <dd className="col-span-2 text-xs"><ClvText r={record} /></dd>
@@ -233,7 +243,7 @@ function ConfidentSection({ perf, provisional }: { perf: Performance; provisiona
       </div>
       {o.picks > 0 && (
         <p className="text-xs text-text-2">
-          For comparison, {METHOD[other].label.toLowerCase()}: {recordText(o)} (<WinPct value={o.win_pct} />), <Units value={o.units} />.
+          For comparison, {METHOD[other].label.toLowerCase()}: {recordText(o)} (<WinPct value={o.win_pct} />), <Units value={o.units} /> (<Roi value={o.roi} /> ROI).
         </p>
       )}
 
@@ -244,7 +254,7 @@ function ConfidentSection({ perf, provisional }: { perf: Performance; provisiona
         <Tile label="Win rate" sub={`break-even at -110 is ${(BREAK_EVEN * 100).toFixed(1)}%; avg confidence ${pctText(t.avg_prob)}`}>
           <WinPct value={t.win_pct} />
         </Tile>
-        <Tile label="Units won" sub={`ROI ${pctText(t.roi, 1)} · 1 unit per pick at DraftKings' price`}>
+        <Tile label="Units won" sub={<>ROI <Roi value={t.roi} /> (units won ÷ units risked) · 1 unit per pick at DraftKings&apos; price</>}>
           <Units value={t.units} />
         </Tile>
         <Tile label="Expected units (EV)" sub={`model's EV per pick: ${t.picks ? `${t.expected_units / t.picks >= 0 ? "+" : ""}${(t.expected_units / t.picks).toFixed(3)}u` : "–"}`}>
@@ -400,10 +410,12 @@ function SeenTable({ rows }: { rows: SeenPick[] }) {
 function NightSummary({ rows }: { rows: { result: PickResult; units: number | null }[] }) {
   const n = (r: PickResult) => rows.filter((p) => p.result === r).length;
   const units = rows.reduce((s, p) => s + (p.units ?? 0), 0);
+  const graded = n("win") + n("loss") + n("push");
   const pending = n("pending");
   return (
     <span className="num text-sm text-text-2">
       {n("win")}–{n("loss")}{n("push") ? `–${n("push")}` : ""} · <Units value={units} />
+      {graded > 0 && <> · <Roi value={roiOf(units, graded)} /> ROI</>}
       {pending > 0 && ` · ${pending} pending`}
       {n("void") > 0 && ` · ${n("void")} void (didn't play)`}
     </span>
@@ -434,15 +446,17 @@ function RunningTally({ rows, title }: { rows: RunningRow[]; title: string }) {
     <section className="overflow-x-auto rounded-lg border border-border bg-surface">
       <div className="border-b border-border px-4 py-2.5 text-sm font-medium">{title}</div>
       <div className="max-h-[360px] overflow-auto">
-        <table className="w-full min-w-[640px] text-sm">
+        <table className="w-full min-w-[800px] text-sm">
           <thead className="sticky top-0 bg-surface text-left text-xs text-text-2">
             <tr className="border-b border-border">
               <th className="px-4 py-2 font-medium">Night</th>
               <th className="px-3 py-2 text-right font-medium">That night</th>
               <th className="px-3 py-2 text-right font-medium">Night units</th>
+              <th className="px-3 py-2 text-right font-medium">Night ROI</th>
               <th className="px-3 py-2 text-right font-medium">Running record</th>
               <th className="px-3 py-2 text-right font-medium">Win %</th>
               <th className="px-3 py-2 text-right font-medium">Running units</th>
+              <th className="px-3 py-2 text-right font-medium">Running ROI</th>
               <th className="px-4 py-2 text-right font-medium">Expected</th>
             </tr>
           </thead>
@@ -452,9 +466,11 @@ function RunningTally({ rows, title }: { rows: RunningRow[]; title: string }) {
                 <td className="px-4 py-1.5">{r.date}</td>
                 <td className="num px-3 py-1.5 text-right">{recordText({ wins: r.day_wins, losses: r.day_losses, pushes: r.day_pushes })}</td>
                 <td className="px-3 py-1.5 text-right"><Units value={r.day_units} /></td>
+                <td className="px-3 py-1.5 text-right"><Roi value={roiOf(r.day_units, r.day_wins + r.day_losses + r.day_pushes)} /></td>
                 <td className="num px-3 py-1.5 text-right font-medium">{recordText(r)}</td>
                 <td className="num px-3 py-1.5 text-right"><WinPct value={r.win_pct} /></td>
                 <td className="px-3 py-1.5 text-right font-medium"><Units value={r.units} /></td>
+                <td className="px-3 py-1.5 text-right"><Roi value={roiOf(r.units, r.wins + r.losses + r.pushes)} /></td>
                 <td className="px-4 py-1.5 text-right"><Units value={r.expected_units} /></td>
               </tr>
             ))}
@@ -474,14 +490,15 @@ function BucketTable({ title, note, first, rows, showAvgProb = false }: {
         <span className="font-medium">{title}</span>
         <span className="ml-2 text-text-2">{note}</span>
       </div>
-      <table className="w-full min-w-[420px] text-sm">
+      <table className="w-full min-w-[480px] text-sm">
         <thead className="text-left text-xs text-text-2">
           <tr className="border-b border-border">
             <th className="px-4 py-2 font-medium">{first}</th>
             <th className="px-3 py-2 text-right font-medium">Record</th>
             <th className="px-3 py-2 text-right font-medium">Win %</th>
             {showAvgProb && <th className="px-3 py-2 text-right font-medium">Avg confidence</th>}
-            <th className="px-4 py-2 text-right font-medium">Units</th>
+            <th className="px-3 py-2 text-right font-medium">Units</th>
+            <th className="px-4 py-2 text-right font-medium">ROI</th>
           </tr>
         </thead>
         <tbody>
@@ -491,7 +508,8 @@ function BucketTable({ title, note, first, rows, showAvgProb = false }: {
               <td className="num px-3 py-1.5 text-right">{b.picks ? recordText(b) : "–"}</td>
               <td className="num px-3 py-1.5 text-right"><WinPct value={b.win_pct} /></td>
               {showAvgProb && <td className="num px-3 py-1.5 text-right text-text-2">{pctText(b.avg_prob)}</td>}
-              <td className="px-4 py-1.5 text-right">{b.picks ? <Units value={b.units} /> : "–"}</td>
+              <td className="px-3 py-1.5 text-right">{b.picks ? <Units value={b.units} /> : "–"}</td>
+              <td className="px-4 py-1.5 text-right">{b.picks ? <Roi value={b.roi} /> : "–"}</td>
             </tr>
           ))}
         </tbody>
@@ -540,6 +558,7 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
   const count = (r: PickResult) => filtered.filter((p) => p.result === r).length;
   const units = filtered.reduce((s, p) => s + (p.units ?? 0), 0);
   const decided = count("win") + count("loss");
+  const graded = decided + count("push");
   const reset = () => setLimit(PAGE);
 
   const select = "rounded-md border border-border bg-bg px-2 py-1 text-sm";
@@ -577,6 +596,7 @@ function PicksTable({ picks, noPick }: { picks: PickRow[]; noPick: number }) {
         <span className="num ml-auto text-sm text-text-2">
           {filtered.length} picks · {count("win")}–{count("loss")}{count("push") ? `–${count("push")}` : ""}
           {decided > 0 && <> · <WinPct value={count("win") / decided} /></>} · <Units value={units} />
+          {graded > 0 && <> · <Roi value={roiOf(units, graded)} /> ROI</>}
         </span>
       </div>
       <div className="max-h-[640px] overflow-auto">
