@@ -135,3 +135,12 @@ def test_shadow_hit_rate_skips_pushes_and_no_picks():
     line = pd.Series([20.5] * 5)
     actual = pd.Series([30.0, 10.0, 30.0, 20.5, 25.0])  # over wins, under wins, no pick, push, under loses
     assert _hit_rate(pred, line, actual) == pytest.approx(2 / 3)
+
+
+def test_shadow_record_counts_wins_and_graded():
+    from app.ml.shadow import _record
+
+    pred = pd.Series([25.0, 15.0, 20.5, 25.0, 15.0])
+    line = pd.Series([20.5] * 5)
+    actual = pd.Series([30.0, 10.0, 30.0, 20.5, 25.0])
+    assert _record(pred, line, actual) == (2, 3)

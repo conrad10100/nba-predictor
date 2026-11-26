@@ -175,7 +175,10 @@ export type Performance = {
   picks: Pick[];
 };
 
-export type AbDay = { date: string; n_lines: number; live_mae_lines: number; shadow_mae_lines: number };
+export type AbDay = {
+  date: string; n_lines: number; live_mae_lines: number; shadow_mae_lines: number;
+  live_wins?: number; live_graded?: number; shadow_wins?: number; shadow_graded?: number;
+};
 export type AbResult = {
   n: number; n_lines: number; live_mae_lines?: number; shadow_mae_lines?: number; live_hit_rate?: number | null;
   shadow_hit_rate?: number | null; live_mae?: number; shadow_mae?: number;
@@ -192,7 +195,7 @@ export type AbStat = {
   week: (AbResult & { start: string; end: string; days?: AbDay[] }) | null;
   verdicts: AbVerdict[];
 };
-export type AbTest = { min_improvement: number; min_line_predictions: number; week_days: number; stats: Partial<Record<Target, AbStat>> };
+export type AbTest = { min_hit_rate_gain: number; min_line_predictions: number; week_days: number; stats: Partial<Record<Target, AbStat>> };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, { cache: "no-store", ...init });

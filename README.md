@@ -87,8 +87,8 @@ Feature sets such as the defender ratings don't switch on from a backtest. Each 
 model (the live model with the switch flipped, stored in `shadow_models`), and every prediction run stores its
 predictions in `shadow_predictions`, apart from the live ones, so picks and the Performance page never use them.
 On the first morning run 7+ days into a test, both are compared on the games played since (same players, same
-final pre-game run): average miss on DraftKings-line players decides (the shadow must be 0.5%+ better over at least
-150 of them), with over/under hit rate against the line shown alongside. Then a new week starts, so a switch can
+final pre-game run): over/under hit rate against the DraftKings line decides (the shadow must win at least 1
+percentage point more often, over at least 150 lines; pushes don't count), with average miss shown alongside. Then a new week starts, so a switch can
 also be undone a week later. The site's **A/B test** page (`/ab-test`) shows the running week and every weekly result; `python -m app.ml.modelctl shadow` prints the same.
 
 ## Model versions and reverting
