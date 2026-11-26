@@ -34,7 +34,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               Accuracy
             </Link>
             <Link href="/performance" className="text-sm text-text-2 hover:text-text">
-              Performance
+              Predictions
             </Link>
             <Link href="/model" className="text-sm text-text-2 hover:text-text">
               Model
