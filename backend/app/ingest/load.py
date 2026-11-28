@@ -62,12 +62,14 @@ def load_espn_logs(season: str, dates: list[date], only: set[str] | None = None)
         abbr_to_id = {t.abbr: t.id for t in s.scalars(select(Team))}
         games = {(g.date, g.home_team_id, g.away_team_id): g.id for g in s.scalars(select(Game).where(Game.date.in_(dates)))}
         players_db = s.scalars(select(Player)).all()
+    id_to_abbr = {i: a for a, i in abbr_to_id.items()}
+    wanted = None if only is None else {(id_to_abbr.get(h), id_to_abbr.get(a)) for (_, h, a), gid in games.items() if gid in only}
     by_name: dict[str, list[Player]] = {}
     for p in players_db:
         by_name.setdefault(nba_client.normalize_name(p.name), []).append(p)
     team_rows, player_rows, unmatched = [], [], set()
     for d in dates:
-        for box in nba_client.espn_box_scores(d):
+        for box in nba_client.espn_box_scores(d, matchups=wanted):
             home, away = abbr_to_id.get(box["home"]), abbr_to_id.get(box["away"])
             game_id = games.get((d, home, away))
             if game_id is None or (only is not None and game_id not in only):
