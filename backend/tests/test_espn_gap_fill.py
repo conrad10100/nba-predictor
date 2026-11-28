@@ -48,7 +48,7 @@ def test_espn_load_touches_only_the_missing_games(db, monkeypatch):
             {"name": n, "team": t, "min": 36.0, "pts": 30, "reb": 10, "oreb": 2, "dreb": 8, "ast": 5, "stl": 1, "blk": 1,
              "tov": 3, "pf": 2, "fgm": 11, "fga": 20, "fg3m": 1, "fg3a": 3, "ftm": 7, "fta": 9, "plus_minus": -7.0}
             for n, t in players]}
-    monkeypatch.setattr(load.nba_client, "espn_box_scores", lambda d: [
+    monkeypatch.setattr(load.nba_client, "espn_box_scores", lambda d, matchups=None: [
         box("CLE", "MEM", [("Someone Else", "CLE")]), box("MIA", "MIL", [("Giannis Antetokounmpo", "MIL")])])
     stored = []
     monkeypatch.setattr(load, "_store_logs", lambda season, teams, players: stored.append((teams, players)) or (len(teams), len(players)))
@@ -56,3 +56,35 @@ def test_espn_load_touches_only_the_missing_games(db, monkeypatch):
     teams, players = stored[0]
     assert set(teams["GAME_ID"]) == {"0022600260"}  # the game stats.nba.com already gave us isn't overwritten
     assert list(players["PLAYER_ID"]) == [203507] and (n_team, n_player, unmatched) == (2, 1, [])
+
+
+def test_refresh_grades_todays_finished_games_only_once(db, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.models import Prediction  # noqa: F401  (table for FILL_ACTUALS)
+
+    monkeypatch.setattr(daily, "init_db", lambda: None)
+    start = datetime(2026, 11, 19, 18, tzinfo=timezone.utc)
+    tipoffs = [{"home": "MIL", "away": "MEM", "state": "post", "completed": True, "start": start},
+               {"home": "CLE", "away": "MIA", "state": "in", "completed": False, "start": start}]
+    calls = []
+    monkeypatch.setattr(daily, "load_espn_logs", lambda season, dates, only: calls.append((dates, only)) or (2, 20, []))
+    daily._grade_finished(TODAY, tipoffs)
+    assert calls == [([TODAY], {"0022600271"})]
+
+    with db.begin() as conn:  # once it's stored as final, later ticks don't download it again
+        conn.execute(Game.__table__.update().where(Game.id == "0022600271").values(status="final"))
+    daily._grade_finished(TODAY, tipoffs)
+    assert len(calls) == 1
+
+
+def test_postponed_or_live_games_are_not_graded(db, monkeypatch):
+    monkeypatch.setattr(daily, "load_espn_logs", lambda *a, **k: pytest.fail("nothing finished"))
+    daily._grade_finished(TODAY, [{"home": "MIL", "away": "MEM", "state": "post", "completed": False, "start": None}])
+
+
+def test_espn_downloads_only_the_wanted_games(db, monkeypatch):
+    seen = []
+    monkeypatch.setattr(load.nba_client, "espn_box_scores", lambda d, matchups=None: seen.append(matchups) or [])
+    load.load_espn_logs("2026-27", [date(2026, 11, 18)], only={"0022600260"})
+    assert seen == [{("MIA", "MIL")}]

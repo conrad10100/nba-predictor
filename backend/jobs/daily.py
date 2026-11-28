@@ -4,7 +4,9 @@ python -m jobs.daily            full run: ingest -> actuals -> evaluate yesterda
 python -m jobs.daily --refresh  injury update: refresh injuries + lines and re-predict today (no retrain)
 python -m jobs.daily --refresh --before-tip 30
                                 the same, but only if a game tips off within 30 minutes (else exit right away), so a
-                                frequent cron gives every game a final pick taken shortly before its own tip-off
+                                frequent cron gives every game a final pick taken shortly before its own tip-off.
+                                Every --refresh tick also loads box scores for today's games that have finished
+                                (ESPN), so their picks are graded the same evening instead of the next morning.
 """
 
 import argparse
@@ -188,6 +190,29 @@ def _game_ids(today, tipoffs: list[dict]) -> set[str]:
     return {by_matchup.get((abbr_to_id.get(g["home"]), abbr_to_id.get(g["away"]))) for g in tipoffs} - {None}
 
 
+def _grade_finished(today, tipoffs: list[dict]) -> None:
+    """Load box scores for today's games ESPN shows as over, so their picks get graded on the next refresh tick after
+    the final buzzer (an afternoon tip-off is settled by evening, not at the next morning's run). Only games not stored
+    as final yet are downloaded, so most ticks this is one small query. The morning run re-pulls these games from
+    stats.nba.com (RELOAD_DAYS), which corrects any ESPN difference. Never stops the refresh."""
+    finished = [g for g in tipoffs if g.get("completed")]
+    if not finished:
+        return
+    try:
+        ids = _game_ids(today, finished)
+        with engine.connect() as conn:
+            todo = set(conn.execute(select(Game.id).where(Game.id.in_(ids), Game.status != "final")).scalars())
+        if not todo:
+            return
+        n_team, n_player, unmatched = load_espn_logs(CURRENT_SEASON, [today], only=todo)
+        with engine.begin() as conn:
+            n_filled = conn.execute(FILL_ACTUALS).rowcount
+        log.info("finished today (ESPN, %d games): %d team-games, %d player-games, %d unmatched %s; graded %d predictions",
+                 len(todo), n_team, n_player, len(unmatched), unmatched[:10], n_filled)
+    except Exception:
+        log.exception("grading today's finished games failed; they'll be graded at a later run")
+
+
 def _started(tipoffs: list[dict]) -> list[dict]:
     return [g for g in tipoffs if g["state"] != "pre"]
 
@@ -240,6 +265,7 @@ if __name__ == "__main__":
         except Exception:
             log.exception("matching started games failed; continuing")
         _lock_started(today_et(), started_ids)
+        _grade_finished(today_et(), tipoffs)  # before the tip-off check below, so every tick grades
     if args.before_tip is not None:
         soon = _tipping_soon(tipoffs, timedelta(minutes=args.before_tip))
         if not soon:

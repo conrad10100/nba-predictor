@@ -83,15 +83,16 @@ def espn_game_lines(on: date) -> list[dict]:
 
 
 def espn_tipoffs(on: date) -> list[dict]:
-    """Each game on a date with its scheduled tip-off: [{home, away, state, start}]. `start` is a timezone-aware UTC
-    datetime, `state` ESPN's pre / in / post."""
+    """Each game on a date with its scheduled tip-off: [{home, away, state, completed, start}]. `start` is a
+    timezone-aware UTC datetime, `state` ESPN's pre / in / post, `completed` True once the game is over (a postponed
+    game is "post" but not completed)."""
     data = _call(lambda: requests.get(ESPN_SCOREBOARD_URL, params={"dates": on.strftime("%Y%m%d")}, timeout=30).json())
     out = []
     for event in data.get("events", []):
         comp = event["competitions"][0]
         side = {t["homeAway"]: ESPN_TO_NBA_ABBR.get(t["team"]["abbreviation"], t["team"]["abbreviation"]) for t in comp["competitors"]}
         out.append({"home": side["home"], "away": side["away"], "state": event["status"]["type"]["state"],
-                    "start": parse_espn_time(event["date"])})
+                    "completed": bool(event["status"]["type"].get("completed")), "start": parse_espn_time(event["date"])})
     return out
 
 
@@ -103,10 +104,11 @@ def parse_espn_time(value: str) -> datetime:
 ESPN_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
 
 
-def espn_box_scores(on: date) -> list[dict]:
+def espn_box_scores(on: date, matchups: set[tuple[str, str]] | None = None) -> list[dict]:
     """Box scores for a date's finished games, from ESPN (fallback when stats.nba.com is unreachable).
 
     [{home, away, periods, players: [{name, team, min, pts, fgm, fga, ...}]}] with NBA team abbreviations.
+    `matchups`: only these (home, away) games, so the other games' box scores aren't downloaded.
     """
     board = _call(lambda: requests.get(ESPN_SCOREBOARD_URL, params={"dates": on.strftime("%Y%m%d")}, timeout=30).json())
     out = []
@@ -116,6 +118,8 @@ def espn_box_scores(on: date) -> list[dict]:
             continue
         comp = event["competitions"][0]
         side = {t["homeAway"]: ESPN_TO_NBA_ABBR.get(t["team"]["abbreviation"], t["team"]["abbreviation"]) for t in comp["competitors"]}
+        if matchups is not None and (side["home"], side["away"]) not in matchups:
+            continue
         summary = _call(lambda: requests.get(ESPN_SUMMARY_URL, params={"event": event["id"]}, timeout=30).json())
         players = []
         for team in summary.get("boxscore", {}).get("players", []):
